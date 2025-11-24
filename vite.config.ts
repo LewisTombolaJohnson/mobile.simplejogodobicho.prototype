@@ -5,5 +5,9 @@ export default defineConfig({
   build: {
     outDir: 'dist',
     sourcemap: true,
+    target: 'esnext' // allow top-level await
+  },
+  esbuild: {
+    target: 'esnext'
   }
 });
