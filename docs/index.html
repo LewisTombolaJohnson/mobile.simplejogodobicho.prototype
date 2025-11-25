@@ -4,7 +4,6 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width,initial-scale=1" />
   <title>Jogo do Bicho (Pixi)</title>
-  <link rel="icon" type="image/png" href="data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAABAAAAAQCAMAAAAoLQ9TAAAASFBMVEUAAAD///////////////////////////////////////////////////////////////8AAAD///8dVq4iAAAAG3RSTlMAAQIDBAUGBwgJCgsMDQ4PEBESExQVFhcYcE0OvgAAAEFJREFUGNNjYIACJiYmZhYWJgYGBgY+AwMDEyMjAwMDAw8GJiYGBgYFhYGJiZGBg4GdgZGBkYmRhYGAEw0A0mQAAOpkC4vZxpo4AAAAASUVORK5CYII=" />
   <style>
     html,body { margin:0; padding:0; height:100%; font-family: system-ui, Arial, sans-serif; background:#0d0f13; color:#eee; }
     #app-root { position:relative; width:100%; height:100vh; overflow:hidden; }
@@ -30,6 +29,7 @@
   @keyframes btnPulse { 0%{ box-shadow:0 0 0 0 rgba(255,255,255,0.35);} 100%{ box-shadow:0 0 0 18px rgba(255,255,255,0); } }
   .play-button:active { transform:scale(.92); }
   </style>
+  <script type="module" crossorigin src="./assets/index-BkScLrZg.js"></script>
 </head>
 <body>
   <div id="app-root"></div>
@@ -57,31 +57,5 @@
       </div>
     </div>
   </div>
-  <script type="module" crossorigin src="/game.jogodobicho.prototype/assets/index-lzGOtmea.js" onerror="console.error('[diag] bundle failed to load');window.__PIXIBUNDLE_ERROR=true;"></script>
-  <script>
-    // Inline diagnostics: report bundle/boot status after a timeout.
-    (function(){
-      const timeout = 2500;
-      setTimeout(()=>{
-        const flags = {
-          bundleLoaded: !!window.__PIXIBUNDLE_LOADED,
-          bootDone: !!window.__PIXIBOOT_DONE,
-          bootError: !!window.__PIXIBOOT_ERROR,
-          canvasError: !!window.__PIXICANVAS_ERROR,
-          canvasPresent: !!document.querySelector('#app-root canvas')
-        };
-        if (!flags.canvasPresent){
-          const msg = `Pixi missing. bundleLoaded=${flags.bundleLoaded} bootDone=${flags.bootDone} bootError=${flags.bootError}`;
-          const div=document.createElement('div');
-          div.textContent=msg;
-          div.style.cssText='position:fixed;top:10px;left:50%;transform:translateX(-50%);background:#b71c1c;color:#fff;padding:8px 14px;font:12px system-ui;border-radius:6px;z-index:9999;';
-          document.body.appendChild(div);
-          console.warn('[diag] canvas missing flags=', flags);
-        } else {
-          console.log('[diag] canvas present flags=', flags);
-        }
-      }, timeout);
-    })();
-  </script>
 </body>
 </html>
