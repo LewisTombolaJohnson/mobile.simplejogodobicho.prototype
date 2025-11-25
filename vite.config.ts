@@ -1,11 +1,12 @@
 import { defineConfig } from 'vite';
 
+// Use relative base so built asset paths resolve correctly when served from /docs on GitHub Pages
 export default defineConfig({
-  base: '/game.jogodobicho.prototype/', // repo name for GitHub Pages
+  base: './',
   build: {
     outDir: 'dist',
     sourcemap: true,
-    target: 'esnext' // allow top-level await
+    target: 'esnext'
   },
   esbuild: {
     target: 'esnext'
