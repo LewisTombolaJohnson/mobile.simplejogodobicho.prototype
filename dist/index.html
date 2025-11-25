@@ -1,0 +1,61 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Jogo do Bicho (Pixi)</title>
+  <style>
+    html,body { margin:0; padding:0; height:100%; font-family: system-ui, Arial, sans-serif; background:#0d0f13; color:#eee; }
+    #app-root { position:relative; width:100%; height:100vh; overflow:hidden; }
+    #overlay-ui { position:absolute; inset:0; pointer-events:none; }
+    .bottom-bar { position:absolute; left:50%; bottom:10px; transform:translateX(-50%); display:flex; align-items:stretch; width:60%; max-width:900px; min-width:620px; pointer-events:auto; background:#1a2027; padding:8px 0; border-radius:18px; box-shadow:0 4px 14px rgba(0,0,0,.5); border:1px solid #2c3642; overflow:hidden; }
+    .section { flex:1; display:flex; flex-direction:column; align-items:center; justify-content:center; position:relative; }
+    .section + .section { border-left:2px solid #2c3642; }
+    .section-label { font-size:13px; font-weight:700; color:#ddd; letter-spacing:.5px; margin:0 0 2px; }
+    .amount, .stake-value { font-size:20px; font-weight:700; font-family:monospace; color:#ffcc66; }
+  .play-button { background:#ff9800; color:#111; font-weight:700; border:none; width:84px; height:84px; border-radius:50%; cursor:pointer; font-size:19px; box-shadow:0 3px 10px rgba(0,0,0,.55); transition:background .2s, transform .15s; display:flex; align-items:center; justify-content:center; }
+  .play-button:hover { background:#ffc107; transform:translateY(-2px); }
+  .stake-row { display:flex; align-items:center; gap:10px; }
+  .stake-btn { background:#2c3642; color:#eee; border:1px solid #3a4756; width:36px; height:36px; font-weight:700; border-radius:10px; cursor:pointer; font-size:20px; line-height:1; padding:0; display:flex; align-items:center; justify-content:center; }
+  .stake-btn:hover { background:#3a4756; }
+  .stake-limit { font-size:10px; color:#8293a3; font-style:italic; margin-top:4px; }
+  @media (max-width:900px){ .bottom-bar { width:80%; } }
+  @media (max-width:700px){ .bottom-bar { width:95%; min-width:0; } }
+  /* Micro-animation helpers */
+  .btn-small { width:60px; height:60px; font-size:14px; }
+  .btn-bounce { animation: btnBounce 420ms cubic-bezier(.34,1.56,.64,1); }
+  .btn-pulse { animation: btnPulse 600ms ease-out; }
+  @keyframes btnBounce { 0%{ transform:scale(1);} 40%{ transform:scale(1.15);} 70%{ transform:scale(0.94);} 100%{ transform:scale(1);} }
+  @keyframes btnPulse { 0%{ box-shadow:0 0 0 0 rgba(255,255,255,0.35);} 100%{ box-shadow:0 0 0 18px rgba(255,255,255,0); } }
+  .play-button:active { transform:scale(.92); }
+  </style>
+  <script type="module" crossorigin src="/game.jogodobicho.prototype/assets/index-KQeXCuhy.js"></script>
+</head>
+<body>
+  <div id="app-root"></div>
+  <div id="overlay-ui">
+    <div class="bottom-bar">
+      <div class="section">
+        <div class="section-label">Balance</div>
+        <div class="amount" id="balance-value">£1000</div>
+      </div>
+      <div class="section">
+        <div style="display:flex; gap:18px; align-items:center;">
+          <button id="random-btn" class="play-button" style="width:60px;height:60px;font-size:14px;background:#607d8b;color:#fff;">Rand</button>
+          <button id="play-btn" class="play-button">Play</button>
+          <button id="clear-btn" class="play-button" style="width:60px;height:60px;font-size:13px;background:#607d8b;color:#fff;">Clear</button>
+        </div>
+      </div>
+      <div class="section">
+        <div class="section-label">Stake</div>
+        <div class="stake-row">
+          <button id="stake-minus" class="stake-btn">-</button>
+          <div class="stake-value" id="stake-value">5p</div>
+          <button id="stake-plus" class="stake-btn">+</button>
+        </div>
+        <div class="stake-limit">Overall stake limit £10</div>
+      </div>
+    </div>
+  </div>
+</body>
+</html>

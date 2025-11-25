@@ -15,57 +15,14 @@ const REORDER_LERP_FACTOR = 0.12;
 const BONUS_FLAG_PROB = 0.20; // adjust for tuning; higher = more frequent bonus rounds
 // Motion map retains Graphics reference + target Y so we can smoothly approach between renders
 const ticketMotion: Record<number,{card:Graphics; targetY:number}> = {};
-// --- Audio Manager (simple HTMLAudioElement wrapper) ---
-class AudioManager {
-  private sounds: Record<string, HTMLAudioElement> = {};
-  private enabled = true;
-  private unlocked = false;
-  private ctx: AudioContext | null = null;
-  constructor(){
-    const unlockHandler = () => {
-      if (this.unlocked) return;
-      try {
-        this.ctx = new (window.AudioContext || (window as any).webkitAudioContext)();
-        // create a silent buffer to satisfy gesture requirement
-        const buffer = this.ctx.createBuffer(1, 1, 22050);
-        const source = this.ctx.createBufferSource(); source.buffer = buffer; source.connect(this.ctx.destination); source.start(0);
-        this.unlocked = true;
-        window.removeEventListener('pointerdown', unlockHandler);
-        window.removeEventListener('keydown', unlockHandler);
-      } catch(e){ console.warn('[audio] unlock failed', e); }
-    };
-    window.addEventListener('pointerdown', unlockHandler);
-    window.addEventListener('keydown', unlockHandler);
-  }
-  register(key: string, src: string, volume=0.6){
-    if (this.sounds[key]) return; const a = new Audio(src); a.volume = volume; a.preload = 'auto'; this.sounds[key] = a;
-  }
-  play(key: string, opts?: { volume?: number; force?: boolean }){
-    if (!this.enabled && !opts?.force) return; const a = this.sounds[key];
-    if (!a){ console.debug('[audio] missing sound', key); return; }
-    if (opts?.volume !== undefined) a.volume = opts.volume;
-    const attempt = () => { try { a.currentTime = 0; const p = a.play(); if (p && p.catch) p.catch(()=>{}); } catch(e){ /* ignore */ } };
-    attempt();
-  }
-  beep(frequency=880, duration=0.12){
-    if (!this.ctx || !this.unlocked) return;
-    const osc = this.ctx.createOscillator(); const gain = this.ctx.createGain();
-    osc.frequency.value = frequency; osc.type='sine';
-    gain.gain.value = 0.0001; gain.gain.linearRampToValueAtTime(0.25, this.ctx.currentTime + 0.01);
-    gain.gain.exponentialRampToValueAtTime(0.0001, this.ctx.currentTime + duration);
-    osc.connect(gain); gain.connect(this.ctx.destination);
-    osc.start(); osc.stop(this.ctx.currentTime + duration);
-  }
-  mute(){ this.enabled = false; }
-  unmute(){ this.enabled = true; }
+// --- Audio removed: provide inert stub to avoid runtime errors where audio.play was called ---
+class AudioStub {
+  play(_key: string, _opts?: { volume?: number; force?: boolean }) { /* no-op */ }
+  beep(_f?: number, _d?: number) { /* no-op */ }
+  mute() {}
+  unmute() {}
 }
-const audio = new AudioManager();
-// Register placeholder sounds (developer should replace with real asset paths)
-audio.register('select','/audio/select.mp3');
-audio.register('confirm','/audio/confirm.mp3');
-audio.register('drum','/audio/drum.mp3',0.45);
-audio.register('match','/audio/match.mp3',0.7);
-audio.register('bigwin','/audio/bigwin.mp3',0.85);
+const audio = new AudioStub();
 
 // Helper to read current stake from stake-value element (avoids ordering issues)
 function getCurrentStake(): number {
