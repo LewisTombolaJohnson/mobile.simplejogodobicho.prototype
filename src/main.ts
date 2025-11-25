@@ -154,6 +154,44 @@ try {
   console.log('[boot] calling app.init with options', initOptions);
   const INIT_TIMEOUT_MS = 4000;
   let initResolved = false;
+  // Pre-fetch expected dynamic chunks to surface 404 / CSP issues early
+  const expectedChunks = [
+    'browserAll',
+    'webworkerAll',
+    'colorToUniform',
+    'WebGPURenderer',
+    'SharedSystems',
+    'WebGLRenderer'
+  ];
+  const chunkResults: Record<string,{ok:boolean; status:number; url:string}> = {};
+  try {
+    const scriptBase = (document.querySelector('script[type="module"][src*="index-"]') as HTMLScriptElement)?.src || location.href;
+    const baseDir = scriptBase.replace(/index-[^/]+\.js.*$/,'');
+    await Promise.all(expectedChunks.map(async name => {
+      const pattern = new RegExp(name+"-.*\\.js$");
+      // Look for matching existing script tags first
+      const found = Array.from(document.querySelectorAll('script')).find(s=> pattern.test(s.getAttribute('src')||''));
+      const chunkUrl = found?.getAttribute('src') || baseDir + 'assets/' + name + '-probe.js';
+      try {
+        const res = await fetch(chunkUrl, { method:'GET' });
+        chunkResults[name] = { ok: res.ok, status: res.status, url: chunkUrl };
+      } catch (fetchErr){
+        chunkResults[name] = { ok:false, status: -1, url: chunkUrl };
+        console.error('[boot] chunk fetch error', name, fetchErr);
+      }
+    }));
+    console.log('[boot] chunk prefetch summary', chunkResults);
+  } catch (prefErr){
+    console.warn('[boot] chunk prefetch failed overall', prefErr);
+  }
+  // Periodic state logger until init resolves (every 1s)
+  const stateInterval = setInterval(()=>{
+    if (initResolved){ clearInterval(stateInterval); return; }
+    const renderer = (app as any).renderer;
+    const rType = renderer?.name;
+    const canvasAttached = !!app.canvas?.parentElement;
+    console.log('[boot] heartbeat', { rType, canvasAttached, initResolved });
+  }, 1000);
   const initPromise = app.init(initOptions).then(()=>{
     initResolved = true;
   });
@@ -166,6 +204,29 @@ try {
         // Dump currently loaded script tags for asset path inspection
         const scripts = Array.from(document.querySelectorAll('script')).map(s=>({src:s.getAttribute('src'), type:s.type}));
         console.log('[boot] scripts present at timeout', scripts);
+        console.log('[boot] chunk prefetch snapshot at timeout', chunkResults);
+        // Surface simple overlay so remote viewer knows it timed out
+        const overlay = document.createElement('div');
+        overlay.style.cssText='position:fixed;top:8px;right:8px;background:#222;border:1px solid #444;padding:10px;font:12px system-ui;color:#eee;max-width:320px;z-index:9999;line-height:1.4';
+        const failed = Object.entries(chunkResults).filter(([,v])=>!v.ok).map(([k,v])=>`${k} (${v.status})`);
+        overlay.innerHTML = `<b>Init timeout (${INIT_TIMEOUT_MS}ms)</b><br/>Failed chunks: ${failed.length?failed.join(', '):'None'}<br/>Renderer object present: ${!!(app as any).renderer}`;
+        document.body.appendChild(overlay);
+        // Schedule emergency fallback canvas if still unresolved later
+        setTimeout(()=>{
+          if (!initResolved){
+            console.warn('[boot] EMERGENCY FALLBACK: creating placeholder canvas');
+            if (!app.canvas.parentElement){
+              const emergency = document.createElement('canvas');
+              emergency.width = 800; emergency.height = 600;
+              emergency.style.background = '#111';
+              const ctx = emergency.getContext('2d');
+              ctx!.fillStyle = '#fff';
+              ctx!.font = '16px system-ui';
+              ctx!.fillText('Fallback canvas displayed. app.init unresolved.', 24, 48);
+              document.body.appendChild(emergency);
+            }
+          }
+        }, 8000);
       }
       res(void 0);
     }, INIT_TIMEOUT_MS))
