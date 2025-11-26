@@ -5,8 +5,11 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
+    "dev-mobile": "VITE_MOBILE=1 vite --force --port 5177 --open",
     "build": "vite build",
-    "preview": "vite preview"
+    "preview": "vite preview",
+    "deploy": "vite build && rm -rf docs/assets && cp -R dist/assets docs/assets && git add docs && git commit -m 'Deploy built assets (preserve index.html)' && git push",
+    "deploy-root": "node scripts/deploy-root.js"
   },
   "dependencies": {
     "pixi.js": "^8.14.1"

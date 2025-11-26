@@ -1,18 +1,46 @@
 import { Application, Container, Graphics, Text, TextStyle, Rectangle } from 'pixi.js';
+// Vite env typing shim for TypeScript (dev-mobile flag)
+declare global {
+  interface ImportMetaEnv { VITE_MOBILE?: string; }
+  interface ImportMeta { env: ImportMetaEnv; }
+}
 // Diagnostic flags for external inspection
 // @ts-ignore
 window.__PIXIBUNDLE_LOADED = true;
 console.log('[diag] bundle evaluated');
 import { animals } from './animals';
 
+// Force an immediate mobile detection log as early as possible so user can see it even before Pixi init.
+const BUILD_TAG = 'mobile-layout-fallback-1';
+console.log('[build-tag]', BUILD_TAG);
+// Capture env flag once (Vite replaces import.meta.env.* statically); if present, set a hard override.
+// This guarantees dev-mobile enforces mobile layout even if later heuristics conflict.
+const __ENV_MOBILE_FLAG = !!import.meta.env.VITE_MOBILE;
+// @ts-ignore
+if (__ENV_MOBILE_FLAG) { window.__FORCE_MOBILE = true; console.log('[env-mobile-flag] Detected VITE_MOBILE -> forcing mobile layout'); }
+// Explicit dev-mobile flag for simpler branching
+const DEV_MOBILE_MODE = __ENV_MOBILE_FLAG === true;
+console.log('[dev-mobile-flag]', { DEV_MOBILE_MODE, raw: import.meta.env.VITE_MOBILE });
+try {
+  // @ts-ignore
+  const earlyMobile = !!(import.meta as any).env?.VITE_MOBILE;
+  console.log('[early-mobile-check] VITE_MOBILE present:', earlyMobile, 'raw value:', (import.meta as any).env?.VITE_MOBILE);
+  // Store for external inspection
+  // @ts-ignore
+  window.__EARLY_MOBILE = earlyMobile;
+} catch(err){
+  console.warn('[early-mobile-check] failed', err);
+}
+
 // Ticket data structures
-interface Ticket { id:number; animals:number[]; complete:boolean; stake:number; lastWin?:number; posMatches?:boolean[]; anyMatches?:boolean[]; randomBuilding?:boolean; tempPotentialWin?:number; }
+interface Ticket { id:number; animals:number[]; complete:boolean; stake:number; lastWin?:number; posMatches?:boolean[]; anyMatches?:boolean[]; randomBuilding?:boolean; tempPotentialWin?:number; winProb?:number; evMult?:number; }
 let tickets: Ticket[] = [];
 // Track a manual 5th selection currently flying (orange outline)
 let manualFlightInProgress: number | null = null;
 let editingTicketId: number | null = null;
 let nextTicketId = 1;
-const TICKET_HEIGHT = 72; // original ticket height
+const TICKET_HEIGHT = 72; // reverted to original ticket height
+const SLOT_ROW_Y = 34; // reverted original slot row Y
 // Slow reorder animation factor (higher -> faster). Targets full settle over ~ baseDelay window.
 const REORDER_LERP_FACTOR = 0.12;
 // Bonus flag probability (per result slot)
@@ -87,8 +115,8 @@ function ensureEditingTicket() {
       console.log('Stake limit exceeded, cannot create new ticket');
       return;
     }
-    const t: Ticket = { id: nextTicketId++, animals: [], complete:false, stake };
-    tickets.unshift(t); editingTicketId = t.id; renderTickets(); refreshStakeLimitStatus(); updatePlayButtonState(); updateClearButtonState();
+  const t: Ticket = { id: nextTicketId++, animals: [], complete:false, stake, winProb:0, evMult:0 };
+  tickets.unshift(t); editingTicketId = t.id; renderTickets(); refreshStakeLimitStatus(); updatePlayButtonState(); updateClearButtonState();
   }
 }
 
@@ -112,7 +140,8 @@ function addAnimalToTicket(animalId: number) {
     manualFlightInProgress = animalId; // mark before push for highlight
   }
   if (t.animals.length < 5) {
-    t.animals.push(animalId);
+  t.animals.push(animalId);
+  updateTicketOdds(t);
     audio.play('select');
     // completion handled after flight animation ends (see pointer tap handler)
     renderTickets(); buildGrid(); layout(); refreshStakeLimitStatus(); updatePlayButtonState(); updateClearButtonState();
@@ -190,14 +219,14 @@ function postInit(){
   ticketsListContainer = new Container();
   ticketsScrollbar = new Graphics();
   leftContainer.addChild(ticketsHeaderContainer, ticketsListContainer, ticketsScrollbar);
+  // Additional explicit mobile layout log inside postInit to ensure visibility
+  console.log('[postInit] isMobileLayout() =>', isMobileLayout());
   attachTicketPanelInteractions();
   // Initial ticket render & layout chain
   renderTickets(); refreshStakeLimitStatus(); updatePlayButtonState(); updateRandomButtonState(); updateClearButtonState();
   buildGrid();
   layout();
-  buildLeftSpacer();
-  buildRightSlots();
-  layout();
+  // No debug banner in production/dev; layout changes will be visible directly
   window.addEventListener('resize', () => { buildGrid(); layout(); });
 }
 
@@ -207,31 +236,62 @@ function postInit(){
 let ticketsHeaderContainer: Container;
 let ticketsListContainer: Container;
 let ticketsScrollY = 0;
+let ticketsScrollX = 0; // horizontal scroll for mobile mode
 let ticketsVisibleHeight = 0; // height of scrollable area (mask height)
+let ticketsVisibleWidth = 0; // width of scrollable area (mask width for mobile)
 let ticketsPanelHeight = 0;
 let ticketsScrollbar: Graphics;
 let isDraggingTickets = false;
 let dragStartY = 0;
+let dragStartX = 0;
 let dragInitialScrollY = 0;
+let dragInitialScrollX = 0;
 function getContentHeight(): number {
   // Deterministic formula: each ticket has TICKET_HEIGHT plus 10px gap, except last gap removed
   if (!tickets.length) return 0;
+  if (isMobileLayout()) {
+    // In mobile: tickets arranged horizontally, so height is just one ticket
+    return TICKET_HEIGHT;
+  }
   return tickets.length * (TICKET_HEIGHT + 10) - 10; // last ticket no trailing gap
 }
+
+function getContentWidth(): number {
+  // For mobile horizontal layout: compute total width of tickets side-by-side
+  if (!tickets.length) return 0;
+  const gap = 10;
+  return tickets.length * (SIDE_COLUMN_WIDTH + gap) - gap; // last ticket no trailing gap
+}
 function scrollTicketsBy(delta:number){
-  const contentHeight = getContentHeight();
-  if (contentHeight <= ticketsVisibleHeight){
-    ticketsScrollY = 0;
-    ticketsListContainer.y = 28;
+  if (isMobileLayout()) {
+    // Horizontal scrolling in mobile mode
+    const contentWidth = getContentWidth();
+    if (contentWidth <= ticketsVisibleWidth){
+      ticketsScrollX = 0;
+      ticketsListContainer.x = 0;
+      updateTicketsScrollbar();
+      return;
+    }
+    const minX = Math.min(0, ticketsVisibleWidth - contentWidth);
+    ticketsScrollX = Math.max(minX, Math.min(0, ticketsScrollX - delta));
+    ticketsListContainer.x = ticketsScrollX;
     updateTicketsScrollbar();
-    console.log('[scroll] No scroll needed; content <= visible', { contentHeight, visible: ticketsVisibleHeight });
-    return;
+  } else {
+    // Vertical scrolling in desktop mode
+    const contentHeight = getContentHeight();
+    if (contentHeight <= ticketsVisibleHeight){
+      ticketsScrollY = 0;
+      ticketsListContainer.y = 28;
+      updateTicketsScrollbar();
+      console.log('[scroll] No scroll needed; content <= visible', { contentHeight, visible: ticketsVisibleHeight });
+      return;
+    }
+    const minY = Math.min(0, ticketsVisibleHeight - contentHeight);
+    ticketsScrollY = Math.max(minY, Math.min(0, ticketsScrollY - delta));
+    ticketsListContainer.y = 28 + ticketsScrollY;
+    console.log('[scroll] wheel/drag', { delta, contentHeight, visible: ticketsVisibleHeight, minY, scrollY: ticketsScrollY });
+    updateTicketsScrollbar();
   }
-  const minY = Math.min(0, ticketsVisibleHeight - contentHeight);
-  ticketsScrollY = Math.max(minY, Math.min(0, ticketsScrollY - delta));
-  ticketsListContainer.y = 28 + ticketsScrollY;
-  console.log('[scroll] wheel/drag', { delta, contentHeight, visible: ticketsVisibleHeight, minY, scrollY: ticketsScrollY });
-  updateTicketsScrollbar();
 }
 function updateTicketsScrollbar(){
   // Visual scrollbar removed per request; keep function to maintain calls for layout consistency.
@@ -244,10 +304,20 @@ function attachTicketPanelInteractions(){
   leftContainer.eventMode = 'static';
   leftContainer.on('pointerdown', (e:any)=>{
     const local = e.getLocalPosition(leftContainer);
-    if (local.x >=0 && local.x <= SIDE_COLUMN_WIDTH && local.y >= 28 && local.y <= 28 + ticketsVisibleHeight){
-      isDraggingTickets = true;
-      dragStartY = local.y;
-      dragInitialScrollY = ticketsScrollY;
+    if (isMobileLayout()) {
+      // In mobile: horizontal drag
+      if (local.y >= 0 && local.y <= TICKET_HEIGHT + 28 && local.x >= 0 && local.x <= ticketsVisibleWidth) {
+        isDraggingTickets = true;
+        dragStartX = local.x;
+        dragInitialScrollX = ticketsScrollX;
+      }
+    } else {
+      // Desktop: vertical drag
+      if (local.x >=0 && local.x <= SIDE_COLUMN_WIDTH && local.y >= 28 && local.y <= 28 + ticketsVisibleHeight){
+        isDraggingTickets = true;
+        dragStartY = local.y;
+        dragInitialScrollY = ticketsScrollY;
+      }
     }
   });
   leftContainer.on('pointerup', ()=>{ isDraggingTickets = false; });
@@ -255,26 +325,93 @@ function attachTicketPanelInteractions(){
   leftContainer.on('pointermove', (e:any)=>{
     if (!isDraggingTickets) return;
     const local = e.getLocalPosition(leftContainer);
-    const dy = local.y - dragStartY;
-    scrollTicketsBy(-dy);
+    if (isMobileLayout()) {
+      const dx = local.x - dragStartX;
+      scrollTicketsBy(-dx);
+      dragStartX = local.x; // reset for continuous drag
+    } else {
+      const dy = local.y - dragStartY;
+      scrollTicketsBy(-dy);
+    }
   });
 }
 
 let winGlowRefs: Graphics[] = [];
+
+// Precomputed odds/expected value per ticket size (1..5) irrespective of specific animals chosen.
+// This assumes draws are uniformly random among animals and ticket animal identities don't affect probability structure.
+interface SizeOdds { winProb:number; evMult:number; }
+const sizeOddsMap: Record<number, SizeOdds> = {};
+function precomputeSizeOdds(){
+  // Always recompute on load so changes to multiplier table propagate.
+  for (const k of Object.keys(sizeOddsMap)) delete sizeOddsMap[+k];
+  const ITERATIONS = 22000; // single upfront heavier Monte Carlo for stable values
+  for (let size=1; size<=5; size++){
+  let winCount=0; let totalMult=0;
+    // Create a synthetic ticket with first 'size' distinct animal ids (identity irrelevant)
+    const synthetic: Ticket = { id:-1, animals: animals.slice(0,size).map(a=>a.id), complete:false, stake:0, winProb:0, evMult:0 };
+    for (let i=0;i<ITERATIONS;i++){
+      const drawn: number[] = [];
+      for (let d=0; d<5; d++) drawn.push(animals[Math.floor(Math.random()*animals.length)].id);
+  const { multiplier } = computeTicketWin(synthetic, drawn);
+  if (multiplier>0) winCount++;
+  totalMult += multiplier;
+    }
+  sizeOddsMap[size] = { winProb: winCount/ITERATIONS, evMult: totalMult/ITERATIONS };
+  }
+  console.log('[odds] size precompute complete', sizeOddsMap);
+}
+precomputeSizeOdds();
+function updateTicketOdds(ticket:Ticket){
+  const size = ticket.animals.length;
+  if (size === 0){ ticket.winProb = 0; ticket.evMult = 0; return; }
+  const cached = sizeOddsMap[size];
+  if (cached){ ticket.winProb = cached.winProb; ticket.evMult = cached.evMult; }
+}
+
 function renderTickets(){
   if (!app || !leftContainer || !ticketsHeaderContainer || !ticketsListContainer) return;
   winGlowRefs = [];
   ticketsListContainer.removeChildren();
   // Header (simple summary / could show total stake)
-  const headerBg = new Graphics(); headerBg.roundRect(0,0,SIDE_COLUMN_WIDTH,28,14); headerBg.fill({ color:0x1a2027 }); headerBg.stroke({ color:0x2e3a47, width:2 }); ticketsHeaderContainer.removeChildren(); ticketsHeaderContainer.addChild(headerBg);
+  ticketsHeaderContainer.removeChildren();
   const totalStake = totalConfirmedStake() + totalPendingStake();
-  const hdrText = new Text(`Tickets (${tickets.length})  Stake: ${formatStakeValue(totalStake)}`, new TextStyle({ fill:'#ffcc66', fontSize:13, fontFamily:'system-ui', fontWeight:'600' })); hdrText.anchor.set(0,0.5); hdrText.x = 10; hdrText.y = 14; ticketsHeaderContainer.addChild(hdrText);
+  const headerStyle = new TextStyle({ fill:'#ffcc66', fontSize:16, fontFamily:'system-ui', fontWeight:'600' });
+  const hdrText = new Text(`Tickets (${tickets.length}) • Stake: ${formatStakeValue(totalStake)}`, headerStyle);
+  hdrText.anchor.set(0.5,0); 
+  if (isMobileLayout()) {
+    // Center the header across the full panel width; if not yet initialized, compute a safe width
+    ticketsHeaderContainer.x = 0;
+    const marginX = 20;
+    const deviceW = window.innerWidth;
+    const baseGridWidth = centerContainer?.width || (CARD_SIZE * GRID_COLS + GRID_GAP * (GRID_COLS - 1));
+    const fallbackWidth = Math.max(Math.min(deviceW - marginX * 2, baseGridWidth), 320);
+    const panelWidth = ticketsVisibleWidth && ticketsVisibleWidth > 0 ? ticketsVisibleWidth : fallbackWidth;
+    hdrText.x = panelWidth / 2;
+  } else {
+    hdrText.x = SIDE_COLUMN_WIDTH/2;
+  }
+  hdrText.y = 4; // slight top offset to align visually with right column header
+  ticketsHeaderContainer.addChild(hdrText);
+  
   tickets.forEach((ticket, idx) => {
     const panelWidth = SIDE_COLUMN_WIDTH;
-    const card = new Graphics(); card.roundRect(0,0,panelWidth,TICKET_HEIGHT,16); card.fill({ color:0x232a34 }); card.stroke({ color:0x2f3d4b, width:2 }); card.y = idx * (TICKET_HEIGHT + 10);
+    const card = new Graphics(); card.roundRect(0,0,panelWidth,TICKET_HEIGHT,16); card.fill({ color:0x232a34 }); card.stroke({ color:0x2f3d4b, width:2 }); 
+    
+    if (isMobileLayout()) {
+      // Horizontal layout: cards side by side
+      card.x = idx * (panelWidth + 10);
+      card.y = 0;
+    } else {
+      // Vertical layout: cards stacked
+      card.x = 0;
+      card.y = idx * (TICKET_HEIGHT + 10);
+    }
+    
     // Motion tracking setup
-    if (!ticketMotion[ticket.id]){ ticketMotion[ticket.id] = { card, targetY: card.y }; }
-    else {
+    if (!ticketMotion[ticket.id]){ 
+      ticketMotion[ticket.id] = { card, targetY: card.y }; 
+    } else {
       // Retain existing card reference if possible
       ticketMotion[ticket.id].targetY = card.y;
     }
@@ -283,11 +420,12 @@ function renderTickets(){
     const winSuffix = ticket.lastWin && ticket.lastWin > 0 ? `  +${formatStakeValue(ticket.lastWin)}` : '';
     const headerStyle = new TextStyle({ fill: ticket.lastWin && ticket.lastWin>0 ? '#ffd54f' : '#ffcc66', fontSize:15, fontFamily:'system-ui', fontWeight:'600' });
     const header = new Text(stakeStr + winSuffix, headerStyle); header.anchor.set(0,0); header.x = 10; header.y = 6; card.addChild(header);
+    // Odds text removed per user request; winProb still computed for potential future internal use.
     if (ticket.lastWin && ticket.lastWin>0){
       const glow = new Graphics(); glow.roundRect(-4,-4,panelWidth+8,TICKET_HEIGHT+8,18); glow.stroke({ color:0xffd54f, width:3 }); glow.alpha = 0.3; card.addChild(glow); winGlowRefs.push(glow);
     }
     // Slots
-    const slotSize = 34; const slotGap = 6; const totalSlotsWidth = slotSize * 5 + slotGap * 4; const startX = (panelWidth - totalSlotsWidth)/2; const startY = 34;
+  const slotSize = 34; const slotGap = 6; const totalSlotsWidth = slotSize * 5 + slotGap * 4; const startX = (panelWidth - totalSlotsWidth)/2; const startY = SLOT_ROW_Y;
     for (let i=0;i<5;i++){
       const hasAnimal = i < ticket.animals.length;
       const positional = hasAnimal && ticket.posMatches && ticket.posMatches[i];
@@ -325,10 +463,19 @@ function renderTickets(){
     ticketsListContainer.addChild(card);
   });
   // Scroll bounds
-  const contentHeight = getContentHeight();
-  const minY = Math.min(0, ticketsVisibleHeight - contentHeight);
-  ticketsScrollY = Math.max(minY, Math.min(0, ticketsScrollY));
-  ticketsListContainer.y = 28 + ticketsScrollY;
+  if (isMobileLayout()) {
+    const contentWidth = getContentWidth();
+    const minX = Math.min(0, ticketsVisibleWidth - contentWidth);
+    ticketsScrollX = Math.max(minX, Math.min(0, ticketsScrollX));
+    ticketsListContainer.x = ticketsScrollX;
+    // Keep list anchored below header in mobile (headerHeight = 28)
+    ticketsListContainer.y = 28;
+  } else {
+    const contentHeight = getContentHeight();
+    const minY = Math.min(0, ticketsVisibleHeight - contentHeight);
+    ticketsScrollY = Math.max(minY, Math.min(0, ticketsScrollY));
+    ticketsListContainer.y = 28 + ticketsScrollY;
+  }
   updateTicketsScrollbar();
   // Clean up motion entries for removed tickets
   const currentIds = new Set(tickets.map(t=>t.id));
@@ -359,9 +506,21 @@ const GRID_COLS = 5;
 const GRID_GAP = 12;
 const CARD_SIZE = 120;
 const SIDE_GAP = 30; // gap between grid and side columns
-const BOTTOM_UI_HEIGHT = 110;
+const BOTTOM_UI_HEIGHT = 70; // shortened cabinet height for better vertical fit
 const TOP_MARGIN = 30;
 const SIDE_COLUMN_WIDTH = 210; // width for ticket panel and reveal slots columns
+
+// Mobile layout helper (multi-source fallback)
+let manualMobileOverride: boolean | null = null; // toggled via keypress 'm'
+function isMobileLayout(): boolean {
+  // TEMP: force mobile to resolve layout immediately
+  // @ts-ignore
+  window.__MOBILE_SOURCES = { forcedAlways: true };
+  // @ts-ignore
+  window.__MOBILE = true;
+  console.log('[isMobileLayout] FORCED MOBILE (temporary)');
+  return true;
+}
 
 // Helper map last two digits -> animal group
 function getAnimalByTwoDigits(two: string) {
@@ -443,7 +602,7 @@ function buildGrid() {
       const targetTicket = after || before;
       if (targetTicket){
         const targetIndex = targetTicket.animals.length - 1;
-        const slotSize = 34; const slotGap = 6; const totalSlotsWidth = slotSize*5 + slotGap*4; const startX = (SIDE_COLUMN_WIDTH - totalSlotsWidth)/2; const slotY = 34;
+  const slotSize = 34; const slotGap = 6; const totalSlotsWidth = slotSize*5 + slotGap*4; const startX = (SIDE_COLUMN_WIDTH - totalSlotsWidth)/2; const slotY = SLOT_ROW_Y;
         const slotX = startX + targetIndex * (slotSize + slotGap) + slotSize/2;
         const fromX = centerContainer.x + card.x + CARD_SIZE/2;
         const fromY = centerContainer.y + card.y + CARD_SIZE/2 - 12;
@@ -490,98 +649,347 @@ function buildGrid() {
 // Replace old left spacer build function with ticket panel sizing
 function buildLeftSpacer() { // renamed function preserved for layout calls
   leftContainer.removeChildren();
-  const gridHeight = centerContainer.height || (CARD_SIZE * GRID_COLS + GRID_GAP * (GRID_COLS - 1));
-  const headerHeight = 28;
-  // Draw background starting BELOW header so header appears "freed"
-  const bg = new Graphics();
-  bg.roundRect(0,headerHeight,SIDE_COLUMN_WIDTH,Math.max(0,gridHeight - headerHeight),18);
-  bg.fill({ color: 0x1a2027 });
-  bg.stroke({ color:0x2e3a47, width:2 });
-  leftContainer.addChild(bg);
-  // Header sits above bg now
+  
+  if (isMobileLayout()) {
+    // Mobile: horizontal tickets panel above grid
+    const headerHeight = 28;
+    const listHeight = mobileTicketsFillHeight ?? TICKET_HEIGHT;
+    const panelHeight = headerHeight + listHeight;
+    // Fit to device width with margins
+    const marginX = 20;
+    const deviceW = window.innerWidth;
+    const gridWidth = Math.max(
+      Math.min(deviceW - marginX*2, centerContainer.width || (CARD_SIZE * GRID_COLS + GRID_GAP * (GRID_COLS - 1))),
+      320
+    );
+    
+    console.log('[buildLeftSpacer mobile]', { gridWidth, panelHeight });
+    
+    // Background for tickets panel
+    const bg = new Graphics();
+    bg.roundRect(0, headerHeight, gridWidth, listHeight, 18);
+    bg.fill({ color: 0x1a2027 });
+    bg.stroke({ color:0x2e3a47, width:2 });
+    leftContainer.addChild(bg);
+    
+  // Header sits above bg; header container stays at x=0
   leftContainer.addChild(ticketsHeaderContainer, ticketsListContainer);
-  // Mask covers only list area beneath header
-  const mask = new Graphics();
-  mask.rect(0,headerHeight,SIDE_COLUMN_WIDTH,Math.max(0,gridHeight - headerHeight));
-  mask.fill(0xffffff);
-  leftContainer.addChild(mask);
+  ticketsHeaderContainer.x = 0;
+  ticketsHeaderContainer.y = 0;
+    
+    // Mask covers list area beneath header
+  // Restore a mask sized to the panel to prevent overflow during play animations
+  const safeMask = new Graphics();
+    safeMask.rect(0, headerHeight, gridWidth, listHeight);
+  safeMask.fill(0xffffff);
+  leftContainer.addChild(safeMask);
+  ticketsListContainer.mask = safeMask;
+    
+  // Add scrollbar
+    leftContainer.addChild(ticketsScrollbar);
+    
+  ticketsVisibleWidth = gridWidth;
+     ticketsVisibleHeight = listHeight;
+  // y already set; ensure header remains at 0
+  ticketsHeaderContainer.y = 0;
+    ticketsListContainer.y = headerHeight;
+    
+    const contentWidth = getContentWidth();
+    const minX = Math.min(0, ticketsVisibleWidth - contentWidth);
+    ticketsScrollX = Math.max(minX, Math.min(0, ticketsScrollX));
+    ticketsListContainer.x = ticketsScrollX;
+    
+  leftContainer.hitArea = new Rectangle(0, 0, gridWidth, panelHeight);
+    updateTicketsScrollbar();
+    
+  } else {
+    // Desktop: vertical tickets panel on left side
+    const gridHeight = centerContainer.height || (CARD_SIZE * GRID_COLS + GRID_GAP * (GRID_COLS - 1));
+    const headerHeight = 28;
+    // Draw background starting BELOW header so header appears "freed"
+    const bg = new Graphics();
+    bg.roundRect(0,headerHeight,SIDE_COLUMN_WIDTH,Math.max(0,gridHeight - headerHeight),18);
+    bg.fill({ color: 0x1a2027 });
+    bg.stroke({ color:0x2e3a47, width:2 });
+    leftContainer.addChild(bg);
+    // Header sits above bg now
+    leftContainer.addChild(ticketsHeaderContainer, ticketsListContainer);
+    // Mask covers only list area beneath header
+    const mask = new Graphics();
+    mask.rect(0,headerHeight,SIDE_COLUMN_WIDTH,Math.max(0,gridHeight - headerHeight));
+    mask.fill(0xffffff);
+    leftContainer.addChild(mask);
+  // Desktop retains mask for vertical scrolling
   ticketsListContainer.mask = mask;
-  // Scrollbar above mask
-  leftContainer.addChild(ticketsScrollbar);
-  ticketsVisibleHeight = Math.max(0, gridHeight - headerHeight);
-  // Slight header lift for breathing space
-  ticketsHeaderContainer.y = 0; // flush top
-  const contentHeight = getContentHeight();
-  const minY = Math.min(0, ticketsVisibleHeight - contentHeight);
-  ticketsScrollY = Math.max(minY, Math.min(0, ticketsScrollY));
-  ticketsListContainer.y = headerHeight + ticketsScrollY;
-  updateTicketsScrollbar();
-  leftContainer.hitArea = new Rectangle(0,0,SIDE_COLUMN_WIDTH,Math.max(0,gridHeight));
-  console.log('[buildLeftSpacer] freedHeader visibleHeight', ticketsVisibleHeight, 'contentHeight', contentHeight);
+    // Scrollbar above mask
+    leftContainer.addChild(ticketsScrollbar);
+    ticketsVisibleHeight = Math.max(0, gridHeight - headerHeight);
+    ticketsVisibleWidth = SIDE_COLUMN_WIDTH;
+    // Slight header lift for breathing space
+    ticketsHeaderContainer.y = 0; // flush top
+    const contentHeight = getContentHeight();
+    const minY = Math.min(0, ticketsVisibleHeight - contentHeight);
+    ticketsScrollY = Math.max(minY, Math.min(0, ticketsScrollY));
+    ticketsListContainer.y = headerHeight + ticketsScrollY;
+    updateTicketsScrollbar();
+    leftContainer.hitArea = new Rectangle(0,0,SIDE_COLUMN_WIDTH,Math.max(0,gridHeight));
+    console.log('[buildLeftSpacer] freedHeader visibleHeight', ticketsVisibleHeight, 'contentHeight', contentHeight);
+  }
 }
 
 // Layout and sizing functions
 function layout() {
   if (!app || !leftContainer || !centerContainer || !rightContainer) return;
-  const w = app.renderer.width;
-  const h = app.renderer.height;
-  // Potential total width
-  const gridWidth = centerContainer.width;
-  let totalWidth = gridWidth + SIDE_COLUMN_WIDTH * 2 + SIDE_GAP * 2; // left + right + gaps
-  let scale = 1;
-  if (totalWidth > w - 40) {
-    scale = Math.min(1, Math.max(0.4, (w - 40) / totalWidth));
-    centerContainer.scale.set(scale);
-    // recompute gridWidth and totalWidth after scaling
-    totalWidth = centerContainer.width + SIDE_COLUMN_WIDTH * 2 + SIDE_GAP * 2;
-  } else {
+  let w = app.renderer.width;
+  let h = app.renderer.height;
+  const mobile = isMobileLayout();
+  console.log('[layout] branch', mobile ? 'MOBILE' : 'DESKTOP', { w, h });
+  
+  if (mobile) {
+    // Add body class for mobile styling hooks (once)
+    document.body.classList.add('mobile-mode');
+    // Mobile layout: results above grid, tickets below grid, all centered horizontally
+    // First ensure grid is at scale 1
     centerContainer.scale.set(1);
-  }
-  const startX = (w - totalWidth) / 2;
-  const verticalSpace = h - BOTTOM_UI_HEIGHT - TOP_MARGIN - 20;
-  const gridHeight = centerContainer.height;
-  const startY = TOP_MARGIN + (verticalSpace - gridHeight) / 2;
-  // Position containers
-  leftContainer.x = startX;
-  leftContainer.y = startY;
-  centerContainer.x = leftContainer.x + SIDE_COLUMN_WIDTH + SIDE_GAP;
-  centerContainer.y = startY;
-  rightContainer.x = centerContainer.x + centerContainer.width + SIDE_GAP;
-  rightContainer.y = startY;
-  // Resize left spacer if height changed
+
+    // Build panels FIRST with correct dimensions before positioning
+    buildLeftSpacer();
+    buildRightSlots();
+
+    // Constrain grid width to device viewport and derive aligned width for sections
+    const marginX = 20;
+    const deviceW = window.innerWidth;
+    let baseGridWidth = centerContainer.width;
+    let gridWidth = Math.max(Math.min(deviceW - marginX * 2, baseGridWidth), 320);
+    let gridHeight = centerContainer.height;
+
+    // Ensure grid fits horizontally: apply width-based scaling if needed
+    const maxGridWidth = deviceW - marginX * 2;
+    if (baseGridWidth > maxGridWidth) {
+      const scaleW = Math.max(0.45, Math.min(1, maxGridWidth / baseGridWidth));
+      centerContainer.scale.set(scaleW);
+      // Recompute grid dimensions after width scaling
+      baseGridWidth = centerContainer.width;
+      gridWidth = Math.max(Math.min(deviceW - marginX * 2, baseGridWidth), 320);
+      gridHeight = centerContainer.height;
+      // Rebuild results panel to align to new gridWidth
+      buildRightSlots();
+    }
+    
+  const ticketPanelHeight = 28 + TICKET_HEIGHT; // header + ticket height
+  const resultPanelHeight = 30 + 100; // header + slot height (approx; slots sized in buildRightSlots)
+  const gap = 15; // gap between sections
+  let totalHeight = ticketPanelHeight + gap + gridHeight + gap + resultPanelHeight;
+
+  // If total content exceeds viewport height, scale down the grid (not tickets/results) to fit
+  const availableViewportH = window.innerHeight - BOTTOM_UI_HEIGHT - TOP_MARGIN - 40;
+    if (totalHeight > availableViewportH) {
+      const maxGridHeight = Math.max(120, availableViewportH - (ticketPanelHeight + resultPanelHeight + gap * 2));
+      const scaleY = Math.min(1, Math.max(0.45, maxGridHeight / gridHeight));
+      // Preserve any width scaling already applied by using uniform scaling to the smaller
+      const currentScale = centerContainer.scale.x;
+      const finalScale = Math.min(currentScale, scaleY);
+      centerContainer.scale.set(finalScale);
+      // Recompute grid dimensions after scaling
+      baseGridWidth = centerContainer.width;
+      gridWidth = Math.max(Math.min(deviceW - marginX * 2, baseGridWidth), 320);
+      gridHeight = centerContainer.height;
+      totalHeight = ticketPanelHeight + gap + gridHeight + gap + resultPanelHeight;
+      // Rebuild results panel to align to new gridWidth
+      buildRightSlots();
+    }
+    
+  // Anchor at top-center: compute tickets fill height to occupy space down to UI
+  const remainingBelowGrid = Math.max(0, availableViewportH - (resultPanelHeight + gap + gridHeight));
+    // Fill space for tickets list (beneath header) and leave 50px buffer for UI at the end
+    const UI_BUFFER = 50;
+  mobileTicketsFillHeight = Math.max(TICKET_HEIGHT, (remainingBelowGrid - gap) - UI_BUFFER - 50);
+
+    // Resize renderer to fully contain mobile content to avoid clipping
+    const desiredW = gridWidth + 40;
+  const desiredH = (resultPanelHeight + gap + gridHeight + gap + (28 + (mobileTicketsFillHeight ?? TICKET_HEIGHT))) + TOP_MARGIN + BOTTOM_UI_HEIGHT + 40;
+    if (desiredW !== w || desiredH !== h) {
+      app.renderer.resize(desiredW, desiredH);
+      w = desiredW; h = desiredH;
+    }
+  // Anchor start at top margin, with an extra drop for visual spacing (now 35px)
+  const startY = TOP_MARGIN + 35;
+    
+    // All elements centered horizontally at the same X
+  const centerX = (w - gridWidth) / 2;
+    
+    // Position results above grid (using rightContainer)
+    // Results centered to gridWidth (buildRightSlots already sizes to gridWidth)
+    rightContainer.x = centerX;
+    rightContainer.y = startY;
+
+    // Position grid below results
+    centerContainer.x = centerX;
+    centerContainer.y = startY + resultPanelHeight + gap;
+
+    // Position tickets below grid (using leftContainer)
+    // Tickets may be wider than grid if not constrained; center within gridWidth
+    leftContainer.x = centerX;
+  leftContainer.y = centerContainer.y + gridHeight + gap;
+  // Rebuild tickets with the new fill height
   buildLeftSpacer();
-  buildRightSlots();
+    
+    console.log('[mobile layout]', {
+      centerX,
+      resultsY: rightContainer.y,
+      gridY: centerContainer.y,
+      ticketsY: leftContainer.y,
+      gridWidth,
+      totalHeight
+    });
+    
+  } else {
+    document.body.classList.remove('mobile-mode');
+    // Desktop layout: side columns + center grid
+    // Potential total width
+    const gridWidth = centerContainer.width;
+    let totalWidth = gridWidth + SIDE_COLUMN_WIDTH * 2 + SIDE_GAP * 2; // left + right + gaps
+    let scale = 1;
+    if (totalWidth > w - 40) {
+      scale = Math.min(1, Math.max(0.4, (w - 40) / totalWidth));
+      centerContainer.scale.set(scale);
+      // recompute gridWidth and totalWidth after scaling
+      totalWidth = centerContainer.width + SIDE_COLUMN_WIDTH * 2 + SIDE_GAP * 2;
+    } else {
+      centerContainer.scale.set(1);
+    }
+    const startX = (w - totalWidth) / 2;
+    const verticalSpace = h - BOTTOM_UI_HEIGHT - TOP_MARGIN - 20;
+    const gridHeight = centerContainer.height;
+    const startY = TOP_MARGIN + (verticalSpace - gridHeight) / 2;
+    // Position containers
+    leftContainer.x = startX;
+    leftContainer.y = startY;
+    centerContainer.x = leftContainer.x + SIDE_COLUMN_WIDTH + SIDE_GAP;
+    centerContainer.y = startY;
+    rightContainer.x = centerContainer.x + centerContainer.width + SIDE_GAP;
+    rightContainer.y = startY;
+    // Resize left spacer if height changed
+    buildLeftSpacer();
+    buildRightSlots();
+  }
   // Parallax removed in clean build; placeholder comment retained
+
+  // Mobile scaling: when mobile layout is active, fit within device screen, never exceed width/height
+  if (isMobileLayout()) {
+    const canvas = app.canvas as HTMLCanvasElement;
+  const vw = window.innerWidth;
+  const vh = window.innerHeight;
+    let cssScale = 1;
+    // Calculate logical content width/height for mobile stack
+    const logicalContentWidth = w;
+    const logicalContentHeight = h;
+    const wScale = vw / logicalContentWidth;
+    const hScale = vh / logicalContentHeight;
+  cssScale = Math.min(1, Math.max(0.5, Math.min(wScale, hScale)));
+  canvas.style.transformOrigin = 'top center';
+    canvas.style.transform = `scale(${cssScale})`;
+    canvas.style.width = `${app.renderer.width}px`; // keep original logical size
+    canvas.style.height = `${app.renderer.height}px`;
+    // Provide a debug attribute for verification
+    canvas.setAttribute('data-mobile-scale', cssScale.toFixed(3));
+  } else {
+    const canvas = app?.canvas as HTMLCanvasElement | undefined;
+    if (canvas) {
+      canvas.style.transform = 'none';
+      canvas.removeAttribute('data-mobile-scale');
+    }
+  }
 }
 
+// Dev convenience: press 'm' to toggle manual mobile override on/off
+window.addEventListener('keydown', (e) => {
+  if (e.key.toLowerCase() === 'm') {
+    manualMobileOverride = manualMobileOverride === true ? false : true;
+    console.log('[manual-toggle] mobile override now', manualMobileOverride);
+    layout();
+  }
+});
+
 let resultSlots: Graphics[] = [];
+// Mobile-only dynamic tickets fill height (height of list area beneath header)
+let mobileTicketsFillHeight: number | null = null;
 function buildRightSlots() {
   rightContainer.removeChildren();
   resultSlots = [];
-  const gridHeight = centerContainer.height || (CARD_SIZE * GRID_COLS + GRID_GAP * (GRID_COLS - 1));
-  const header = new Text('Game Result', new TextStyle({ fill:'#ffcc66', fontSize:16, fontFamily:'system-ui', fontWeight:'600' }));
-  header.anchor.set(0.5,0);
-  header.x = SIDE_COLUMN_WIDTH/2; header.y = 0;
-  rightContainer.addChild(header);
+  
+  if (isMobileLayout()) {
+    // Mobile: horizontal results below grid
+    const marginX = 20;
+    const deviceW = window.innerWidth;
+    const baseGridWidth = centerContainer.width || (CARD_SIZE * GRID_COLS + GRID_GAP * (GRID_COLS - 1));
+    const gridWidth = Math.max(Math.min(deviceW - marginX*2, baseGridWidth), 320);
+    
+    console.log('[buildRightSlots mobile]', { gridWidth });
+    
+    const header = new Text('Game Result', new TextStyle({ fill:'#ffcc66', fontSize:16, fontFamily:'system-ui', fontWeight:'600' }));
+    header.anchor.set(0.5,0);
+    header.x = gridWidth/2; 
+    header.y = 0;
+    rightContainer.addChild(header);
+    
   const slotCount = 5;
-  const gap = 16;
-  const headerOffset = 30; // space for header
-  const availableHeight = gridHeight - headerOffset;
-  const totalGapHeight = gap * (slotCount - 1);
-  const slotHeight = (availableHeight - totalGapHeight) / slotCount;
-  for (let i=0;i<slotCount;i++) {
-    const slot = new Graphics();
-    slot.roundRect(0,0,SIDE_COLUMN_WIDTH,slotHeight,14);
-    slot.fill({ color: 0x232a34 });
-    slot.stroke({ color: 0x445364, width:2 });
-    slot.y = headerOffset + i * (slotHeight + gap);
-    const numeralStyle = new TextStyle({ fill:'#ffffff', fontSize: Math.min(140, slotHeight * 0.8), fontFamily:'system-ui', fontWeight:'700', align:'center' });
-    const numeral = new Text(String(i+1), numeralStyle);
-    numeral.anchor.set(0.5);
-    numeral.x = SIDE_COLUMN_WIDTH/2; numeral.y = slotHeight/2; numeral.alpha = 0.06;
-    slot.addChild(numeral);
-    rightContainer.addChild(slot);
-    resultSlots.push(slot);
+  const gap = Math.max(10, Math.min(18, Math.floor((gridWidth) / 30)));
+  const headerOffset = 30;
+  // Responsive slot width to fit exactly within gridWidth
+  const resultsCount = 5;
+  const totalGap = gap * (resultsCount - 1);
+  const slotWidth = Math.floor((gridWidth - totalGap) / resultsCount);
+  const slotHeight = Math.max(72, Math.min(110, Math.floor(slotWidth * 0.44)));
+    
+  const totalSlotsWidth = slotWidth * resultsCount + gap * (resultsCount - 1);
+    const startX = (gridWidth - totalSlotsWidth) / 2;
+    
+    console.log('[buildRightSlots mobile slots]', { totalSlotsWidth, startX, slotCount });
+    
+    for (let i=0;i<slotCount;i++) {
+      const slot = new Graphics();
+      slot.roundRect(0,0,slotWidth,slotHeight,14);
+      slot.fill({ color: 0x232a34 });
+      slot.stroke({ color: 0x445364, width:2 });
+      slot.x = startX + i * (slotWidth + gap);
+      slot.y = headerOffset;
+  const numeralStyle = new TextStyle({ fill:'#ffffff', fontSize: Math.min(72, slotHeight * 0.85), fontFamily:'system-ui', fontWeight:'700', align:'center' });
+  const numeral = new Text(String(i+1), numeralStyle);
+  numeral.anchor.set(0.5);
+  numeral.x = slotWidth/2; numeral.y = slotHeight/2; numeral.alpha = 0.06;
+      slot.addChild(numeral);
+      rightContainer.addChild(slot);
+      resultSlots.push(slot);
+    }
+    
+  } else {
+    // Desktop: vertical results on right side
+    const gridHeight = centerContainer.height || (CARD_SIZE * GRID_COLS + GRID_GAP * (GRID_COLS - 1));
+    const header = new Text('Game Result', new TextStyle({ fill:'#ffcc66', fontSize:16, fontFamily:'system-ui', fontWeight:'600' }));
+    header.anchor.set(0.5,0);
+    header.x = SIDE_COLUMN_WIDTH/2; header.y = 0;
+    rightContainer.addChild(header);
+    const slotCount = 5;
+    const gap = 16;
+    const headerOffset = 30; // space for header
+    const availableHeight = gridHeight - headerOffset;
+    const totalGapHeight = gap * (slotCount - 1);
+    const slotHeight = (availableHeight - totalGapHeight) / slotCount;
+    for (let i=0;i<slotCount;i++) {
+      const slot = new Graphics();
+      slot.roundRect(0,0,SIDE_COLUMN_WIDTH,slotHeight,14);
+      slot.fill({ color: 0x232a34 });
+      slot.stroke({ color: 0x445364, width:2 });
+      slot.y = headerOffset + i * (slotHeight + gap);
+      const numeralStyle = new TextStyle({ fill:'#ffffff', fontSize: Math.min(140, slotHeight * 0.8), fontFamily:'system-ui', fontWeight:'700', align:'center' });
+      const numeral = new Text(String(i+1), numeralStyle);
+      numeral.anchor.set(0.5);
+      numeral.x = SIDE_COLUMN_WIDTH/2; numeral.y = slotHeight/2; numeral.alpha = 0.06;
+      slot.addChild(numeral);
+      rightContainer.addChild(slot);
+      resultSlots.push(slot);
+    }
   }
 }
 
@@ -659,7 +1067,7 @@ let randomFlightPreview: number[] = []; // ids highlighted for random selection 
 const ticketPreviousY: Record<number, number> = {};
 // Compute slot center (x,y) in stage coordinates for given slot index (0..4) within ticket being edited (top-most during creation)
 function computeSlotCenter(slotIndex:number): {x:number;y:number} {
-  const slotSize = 34; const slotGap = 6; const totalSlotsWidth = slotSize * 5 + slotGap * 4; const startX = (SIDE_COLUMN_WIDTH - totalSlotsWidth)/2; const startY = 34;
+  const slotSize = 34; const slotGap = 6; const totalSlotsWidth = slotSize * 5 + slotGap * 4; const startX = (SIDE_COLUMN_WIDTH - totalSlotsWidth)/2; const startY = SLOT_ROW_Y;
   const cx = leftContainer.x + startX + slotIndex * (slotSize + slotGap) + slotSize/2;
   const cy = leftContainer.y + 28 + startY + slotSize/2; // +28 header offset
   return { x: cx, y: cy };
@@ -700,6 +1108,7 @@ function createRandomTicket(){
         const ticket = tickets.find(tt=>tt.id===t.id);
         if (ticket && !ticket.complete){
           ticket.animals.push(aId);
+          updateTicketOdds(ticket);
           randomFlightPreview = randomFlightPreview.filter(x=>x!==aId);
           if (ticket.animals.length === count){ ticket.complete = true; ticket.randomBuilding = false; editingTicketId = null; randomFlightPreview = []; }
           renderTickets(); buildGrid(); spawnArrivalParticles(toX,toY);
@@ -709,7 +1118,7 @@ function createRandomTicket(){
             const ticketCard = ticketsListContainer.children[cardIdx] as Container | undefined;
             if (ticketCard){
               // Slot position corresponds to index (left-to-right)
-              const slotSize = 34; const slotGap = 6; const totalSlotsWidth = slotSize * 5 + slotGap * 4; const startX = (SIDE_COLUMN_WIDTH - totalSlotsWidth)/2; const startY = 34;
+              const slotSize = 34; const slotGap = 6; const totalSlotsWidth = slotSize * 5 + slotGap * 4; const startX = (SIDE_COLUMN_WIDTH - totalSlotsWidth)/2; const startY = SLOT_ROW_Y;
               const slotX = startX + (ticket.animals.length - 1) * (slotSize + slotGap);
               // Find emoji text inside that slot
               const slotGraphic = ticketCard.children.find(c => c instanceof Graphics && (c as Graphics).y === startY && (c as Graphics).x === slotX) as Graphics | undefined;
@@ -753,46 +1162,41 @@ function animateBalanceTo(target:number){
   requestAnimationFrame(step);
 }
 // New unified payout computation per clarified rules
+// Revised multiplier model approximating traditional Jogo do Bicho style escalation.
+// Mapping rationale (approximate public payout ranges vary by operator):
+//  Grupo (single group) often ~18x                     -> size 1 all-present 18x
+//  Duque de Grupo (2 groups) can span ~200x-600x       -> size 2 both-present 300x (midpoint)
+//  Terno de Grupo (3 groups) often ~2000x-4000x        -> size 3 all-present 3000x
+//  Quadra (4 groups) scaled up (rarer)                 -> size 4 all-present 15000x (extrapolated)
+//  Quina (5 groups) very rare high jackpot            -> size 5 all-present 60000x (extrapolated)
+// Partial matches are non-traditional but added for UX feedback; values chosen to keep EV moderate.
+// Positional bonuses removed; only presence count drives payout.
 function computeTicketWin(ticket: Ticket, drawnAnimalIds: (number|null)[]): { multiplier:number; posMatches:boolean[]; anyMatches:boolean[] } {
   const size = ticket.animals.length;
-  const posMatches = new Array(size).fill(false);
+  const posMatches = new Array(size).fill(false); // retained for UI tick marks (positional logic now same as any match)
   const anyMatches = new Array(size).fill(false);
   const drawnSet = new Set(drawnAnimalIds.filter(id => id !== null) as number[]);
   ticket.animals.forEach((aId, idx) => {
-    if (drawnAnimalIds[idx] !== null && drawnAnimalIds[idx] === aId) posMatches[idx] = true;
+    if (drawnAnimalIds[idx] !== null && drawnAnimalIds[idx] === aId) posMatches[idx] = true; // still mark positional for visual
     if (drawnSet.has(aId)) anyMatches[idx] = true;
   });
-  const positionalCount = posMatches.filter(Boolean).length;
   const presentCount = anyMatches.filter(Boolean).length;
   let mult = 0;
-  switch (size) {
-    case 1: // one animal
-      if (positionalCount === 1) mult = 12; else if (presentCount === 1) mult = 3;
+  switch(size){
+    case 1: // Grupo style (choose one group)
+      if (presentCount === 1) mult = 18;
       break;
-    case 2: // two animals
-      if (presentCount === 2 && positionalCount === 2) mult = 95; // both right positions
-      else if (presentCount === 2) mult = 12; // both present any other positions
-      else if (presentCount === 1) mult = 1; // one present (position irrelevant)
+    case 2: // Duque style
+      if (presentCount === 2) mult = 300; else if (presentCount === 1) mult = 2.5;
       break;
-    case 3:
-      if (presentCount === 3 && positionalCount === 3) mult = 700;
-      else if (presentCount === 3) mult = 42;
-      else if (presentCount === 2) mult = 3;
-      else if (presentCount === 1) mult = 0.75;
+    case 3: // Terno style
+      if (presentCount === 3) mult = 3000; else if (presentCount === 2) mult = 22; else if (presentCount === 1) mult = 2;
       break;
-    case 4:
-      if (presentCount === 4 && positionalCount === 4) mult = 4000;
-      else if (presentCount === 4) mult = 500;
-      else if (presentCount === 3) mult = 22;
-      else if (presentCount === 2) mult = 1.5;
-      else if (presentCount === 1) mult = 0.2;
+    case 4: // Quadra style
+      if (presentCount === 4) mult = 15000; else if (presentCount === 3) mult = 140; else if (presentCount === 2) mult = 8; else if (presentCount === 1) mult = 1.2;
       break;
-    case 5: // positional ignored per clarification B
-      if (presentCount === 5) mult = 17000;
-      else if (presentCount === 4) mult = 150;
-      else if (presentCount === 3) mult = 5;
-      else if (presentCount === 2) mult = 1;
-      else if (presentCount === 1) mult = 0.2;
+    case 5: // Quina style
+      if (presentCount === 5) mult = 60000; else if (presentCount === 4) mult = 1000; else if (presentCount === 3) mult = 55; else if (presentCount === 2) mult = 5; else if (presentCount === 1) mult = 0.8;
       break;
   }
   return { multiplier: mult, posMatches, anyMatches };
@@ -835,28 +1239,28 @@ if (playBtn) {
       const res = results[revealIndex];
       const slot = resultSlots[revealIndex]; if (!slot) continue;
       const isFinal = revealIndex === results.length - 1;
-      const emojiStyle = new TextStyle({ fill:'#fff', fontSize: Math.min(64, slot.height*0.45), fontFamily:'system-ui' });
-      const numStyle = new TextStyle({ fill:'#ffc107', fontSize: Math.min(28, slot.height*0.25), fontFamily:'monospace' });
+  const emojiStyle = new TextStyle({ fill:'#fff', fontSize: Math.min(64, slot.height*0.45), fontFamily:'system-ui' });
+  const numStyle = new TextStyle({ fill:'#ffc107', fontSize: Math.min(28, slot.height*0.25), fontFamily:'monospace' });
   let emoji: Text; let numberText: Text; let bonusIcon: Graphics | null = null;
       if (!isFinal){
         // Shimmer & animated reveal for first 4 slots
         const shimmer = new Graphics();
-        const slotW = SIDE_COLUMN_WIDTH; const slotH = slot.height;
+  const slotW = slot.width; const slotH = slot.height;
         shimmer.rect(0,0,60,slotH);
         shimmer.fill({ color:0xffffff, alpha:0.12 });
         shimmer.x = -70; shimmer.y = 0; slot.addChild(shimmer);
         let sf=0; const sDur=40; app.ticker.add(function shimmerTick(){
           sf++; const p = sf/sDur; shimmer.x = -70 + (slotW + 140)*p; shimmer.alpha = 0.18*(1 - Math.abs(p-0.5)*1.9); if (sf>=sDur){ app.ticker.remove(shimmerTick); shimmer.destroy(); }
         });
-        emoji = new Text(res.animal ? res.animal.emoji : '❓', emojiStyle); emoji.anchor.set(0.5); emoji.x = SIDE_COLUMN_WIDTH/2; emoji.y = slot.height/2 - 10; emoji.alpha = 0; emoji.scale.set(0.2);
-        numberText = new Text(res.number, numStyle); numberText.anchor.set(0.5); numberText.x = SIDE_COLUMN_WIDTH/2; numberText.y = slot.height - 5 - (numStyle.fontSize as number)/2; numberText.alpha = 0; numberText.scale.set(0.2);
+  emoji = new Text(res.animal ? res.animal.emoji : '❓', emojiStyle); emoji.anchor.set(0.5); emoji.x = slotW/2; emoji.y = slotH/2 - 10; emoji.alpha = 0; emoji.scale.set(0.2);
+  numberText = new Text(res.number, numStyle); numberText.anchor.set(0.5); numberText.x = slotW/2; numberText.y = slotH - 5 - (numStyle.fontSize as number)/2; numberText.alpha = 0; numberText.scale.set(0.2);
         // Bonus icon (small star in corner) if bonus
         if (res.bonus) {
           bonusIcon = new Graphics();
           bonusIcon.star(0,0,5,14,6); // Pixi Graphics star
           bonusIcon.fill({ color:0x000000, alpha:0.85 });
           bonusIcon.stroke({ color:0xffd54f, width:2 });
-          bonusIcon.x = SIDE_COLUMN_WIDTH - 26; bonusIcon.y = 14; bonusIcon.scale.set(0.55); bonusIcon.alpha = 0; // fade in with emoji
+          bonusIcon.x = slotW - 26; bonusIcon.y = 14; bonusIcon.scale.set(0.55); bonusIcon.alpha = 0; // fade in with emoji
           slot.addChild(bonusIcon);
         }
         slot.addChild(emoji, numberText);
@@ -870,12 +1274,12 @@ if (playBtn) {
         requestAnimationFrame(animate);
       } else {
         // Instant final reveal (no shimmer, no easing) immediately after shake completes
-        emoji = new Text(res.animal ? res.animal.emoji : '❓', emojiStyle); emoji.anchor.set(0.5); emoji.x = SIDE_COLUMN_WIDTH/2; emoji.y = slot.height/2 - 10; emoji.alpha = 1; emoji.scale.set(1);
-        numberText = new Text(res.number, numStyle); numberText.anchor.set(0.5); numberText.x = SIDE_COLUMN_WIDTH/2; numberText.y = slot.height - 5 - (numStyle.fontSize as number)/2; numberText.alpha = 1; numberText.scale.set(1);
+  emoji = new Text(res.animal ? res.animal.emoji : '❓', emojiStyle); emoji.anchor.set(0.5); emoji.x = slot.width/2; emoji.y = slot.height/2 - 10; emoji.alpha = 1; emoji.scale.set(1);
+  numberText = new Text(res.number, numStyle); numberText.anchor.set(0.5); numberText.x = slot.width/2; numberText.y = slot.height - 5 - (numStyle.fontSize as number)/2; numberText.alpha = 1; numberText.scale.set(1);
         if (res.bonus){
           bonusIcon = new Graphics();
           bonusIcon.star(0,0,5,16,7); bonusIcon.fill({ color:0x000000, alpha:0.85 }); bonusIcon.stroke({ color:0xffd54f, width:2 });
-          bonusIcon.x = SIDE_COLUMN_WIDTH - 26; bonusIcon.y = 14; bonusIcon.scale.set(0.6); bonusIcon.alpha = 1;
+          bonusIcon.x = slot.width - 26; bonusIcon.y = 14; bonusIcon.scale.set(0.6); bonusIcon.alpha = 1;
           slot.addChild(bonusIcon);
         }
         slot.addChild(emoji, numberText);

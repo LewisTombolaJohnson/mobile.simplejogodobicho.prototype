@@ -1,0 +1,6 @@
+/* Mobile mode explicit styling overrides */
+body.mobile-mode {
+  background: #0f1419;
+}
+/* Removed canvas outline to avoid visual clipping */
+/* Mobile toast removed per request */
