@@ -13,6 +13,11 @@ import { animals } from './animals';
 // Force an immediate mobile detection log as early as possible so user can see it even before Pixi init.
 const BUILD_TAG = 'mobile-layout-fallback-1';
 console.log('[build-tag]', BUILD_TAG);
+// Global layout mode: when true, remove horizontal margins and force panels to span full device width.
+// This is to ensure all 5 result boxes are fully visible edge-to-edge without cropping.
+const EDGE_TO_EDGE = true;
+// Fixed mobile logical width target (previously hard clamp). Retained for reference but no longer used to shrink logical width.
+const MOBILE_TARGET_WIDTH = 720; // historical baseline; width scaling now width-driven only
 // Capture env flag once (Vite replaces import.meta.env.* statically); if present, set a hard override.
 // This guarantees dev-mobile enforces mobile layout even if later heuristics conflict.
 const __ENV_MOBILE_FLAG = !!import.meta.env.VITE_MOBILE;
@@ -78,18 +83,7 @@ function totalPendingStake(){ return tickets.filter(t=>!t.complete).reduce((sum,
 // Gameplay state flags (moved earlier to avoid TDZ issues in updatePlayButtonState)
 let isPlaying = false;
 function updatePlayButtonState(){
-  const btn = document.getElementById('play-btn') as HTMLButtonElement | null;
-  if (!btn) return;
-  const hasCompleted = tickets.some(t=>t.complete);
-  if (!hasCompleted || isPlaying){
-    btn.setAttribute('disabled','true');
-    btn.style.opacity = '0.35';
-    btn.style.cursor = 'not-allowed';
-  } else {
-    btn.removeAttribute('disabled');
-    btn.style.opacity = '1';
-    btn.style.cursor = 'pointer';
-  }
+  // Play button removed; keep random button state updates
   updateRandomButtonState();
 }
 function refreshStakeLimitStatus(){
@@ -219,15 +213,18 @@ function postInit(){
   ticketsListContainer = new Container();
   ticketsScrollbar = new Graphics();
   leftContainer.addChild(ticketsHeaderContainer, ticketsListContainer, ticketsScrollbar);
-  // Additional explicit mobile layout log inside postInit to ensure visibility
   console.log('[postInit] isMobileLayout() =>', isMobileLayout());
   attachTicketPanelInteractions();
-  // Initial ticket render & layout chain
   renderTickets(); refreshStakeLimitStatus(); updatePlayButtonState(); updateRandomButtonState(); updateClearButtonState();
   buildGrid();
   layout();
-  // No debug banner in production/dev; layout changes will be visible directly
-  window.addEventListener('resize', () => { buildGrid(); layout(); });
+  // Show lobby on initial load
+  showLaunchTicketMenu();
+  if (randomBtn) randomBtn.style.display = 'none';
+  if (clearBtn) clearBtn.style.display = 'none';
+  // Center tickets panel
+  buildCenterTicketsPanel();
+  attachCenterScroll();
 }
 
 // Containers declared in initPixi; placeholder comments retained for context.
@@ -516,10 +513,9 @@ function isMobileLayout(): boolean {
   // TEMP: force mobile to resolve layout immediately
   // @ts-ignore
   window.__MOBILE_SOURCES = { forcedAlways: true };
-  // @ts-ignore
+  // @ts-ignore force flag on window for external inspection
   window.__MOBILE = true;
-  console.log('[isMobileLayout] FORCED MOBILE (temporary)');
-  return true;
+  return true; // silent force
 }
 
 // Helper map last two digits -> animal group
@@ -530,120 +526,40 @@ function getAnimalByTwoDigits(two: string) {
 }
 
 // Build animal grid
-function buildGrid() {
-  if (!app || !centerContainer) return;
-  centerContainer.removeChildren();
-  const editing = currentEditingTicket();
-  const selectedIds = new Set(editing?.animals || []);
-  const emojiStyle = new TextStyle({ fill:'#fff', fontSize: 42, fontFamily:'system-ui', align:'center' });
-  const numsStyle = new TextStyle({ fill:'#90caf9', fontSize:14, fontFamily:'monospace', align:'center' });
-  // Reset grid positions for random ticket animation (avoid const reassignment)
-  for (const key in gridPositions){ delete (gridPositions as any)[key]; }
-  animals.forEach((animal, idx) => {
-    const col = idx % GRID_COLS;
-    const row = Math.floor(idx / GRID_COLS);
-    const card = new Graphics();
-    card.roundRect(0,0,CARD_SIZE,CARD_SIZE,18);
-  const isSelected = selectedIds.has(animal.id);
-  const isPreview = randomFlightPreview.includes(animal.id); // random awaiting flight
-  const isManual5th = manualFlightInProgress === animal.id; // manual 5th in-flight
-  let fillCol = 0x1e242f;
-  let strokeCol = 0x374252;
-  let strokeW = 2;
-  // Priority: manual 5th (orange) > selected (gold) > random preview (yellow) > base
-  if (isPreview){ fillCol = 0x242e38; strokeCol = 0xffd54f; strokeW = 3; }
-  if (isSelected){ fillCol = 0x253040; strokeCol = 0xffd54f; strokeW = 4; }
-  if (isManual5th){ fillCol = 0x2e2612; strokeCol = 0xff9800; strokeW = 4; }
-    card.fill({ color: fillCol });
-    card.stroke({ color: strokeCol, width: strokeW });
-    card.x = col * (CARD_SIZE + GRID_GAP);
-    card.y = row * (CARD_SIZE + GRID_GAP);
-    card.eventMode = 'static'; card.cursor = 'pointer';
-    // Hover tilt + shadow
-    let hoverFrame = 0; let isHover = false;
-    const shadow = new Graphics(); shadow.roundRect(4,8,CARD_SIZE-8,CARD_SIZE-8,16); shadow.fill({ color:0x000000, alpha:0.35 }); shadow.alpha = 0; card.addChild(shadow); shadow.zIndex = -1;
-    card.on('pointerover', ()=>{ isHover = true; });
-    card.on('pointerout', ()=>{ isHover = false; });
-    app.ticker.add(function hoverTick(){
-      // target values
-      const targetScale = isHover ? 1.05 : 1;
-      const targetRot = isHover ? 0.04 : 0;
-      const targetShadow = isHover ? 0.6 : 0;
-      // lerp
-      card.scale.x += (targetScale - card.scale.x)*0.18;
-      card.scale.y = card.scale.x;
-      card.rotation += (targetRot - card.rotation)*0.18;
-      shadow.alpha += (targetShadow - shadow.alpha)*0.15;
-    });
-    card.on('pointertap', () => {
-      // Pulse ring
-      const ring = new Graphics();
-      ring.circle(0,0,CARD_SIZE/2 - 6);
-      ring.stroke({ color:0xffd54f, width:4 });
-      ring.x = card.x + CARD_SIZE/2;
-      ring.y = card.y + CARD_SIZE/2 - 12;
-      ring.alpha = 0.9;
-      centerContainer.addChild(ring);
-      let rf = 0; const rTotal = 28;
-      app.ticker.add(function ringTick(){
-        rf++;
-        const p = rf/rTotal;
-        ring.scale.set(1 + p*0.55);
-        ring.alpha = 0.9 * (1 - p);
-        if (rf >= rTotal){ app.ticker.remove(ringTick); ring.destroy(); }
-      });
-      const before = currentEditingTicket();
-  const wasEditing = currentEditingTicket();
-  const beforeCount = wasEditing?.animals.length || 0;
-  addAnimalToTicket(animal.id);
-  const afterTicket = currentEditingTicket() || wasEditing;
-  const becameFifth = beforeCount === 4; // we just added 5th
-      const after = currentEditingTicket();
-      const targetTicket = after || before;
-      if (targetTicket){
-        const targetIndex = targetTicket.animals.length - 1;
-  const slotSize = 34; const slotGap = 6; const totalSlotsWidth = slotSize*5 + slotGap*4; const startX = (SIDE_COLUMN_WIDTH - totalSlotsWidth)/2; const slotY = SLOT_ROW_Y;
-        const slotX = startX + targetIndex * (slotSize + slotGap) + slotSize/2;
-        const fromX = centerContainer.x + card.x + CARD_SIZE/2;
-        const fromY = centerContainer.y + card.y + CARD_SIZE/2 - 12;
-        const toX = leftContainer.x + slotX;
-        const toY = leftContainer.y + 28 + slotY + slotSize/2;
-        const fly = new Text(animal.emoji, new TextStyle({ fill:'#ffd54f', fontSize:42 }));
-        fly.anchor.set(0.5); fly.x = fromX; fly.y = fromY; fly.alpha = 1; fly.scale.set(0.9);
-        app.stage.addChild(fly);
-        let f = 0; const dur = 36;
-        app.ticker.add(function travel(){
-          f++;
-          const p = f/dur;
-          const e = p < 0.5 ? 4*p*p*p : 1 - Math.pow(-2*p+2,3)/2;
-          fly.x = fromX + (toX - fromX)*e;
-          fly.y = fromY + (toY - fromY)*e - Math.sin(p*Math.PI)*28;
-          fly.scale.set(0.9 + 0.2*e);
-          fly.alpha = 1 - Math.max(0,(p-0.7)/0.3);
-          if (f >= dur){ app.ticker.remove(travel); fly.destroy(); }
-            if (manualFlightInProgress === animal.id){
-              // finalize ticket completion now
-              const t = tickets.find(tt=>tt.id===targetTicket.id);
-              if (t){ t.complete = true; editingTicketId = null; }
-              manualFlightInProgress = null; buildGrid(); updatePlayButtonState(); updateClearButtonState();
-            }
-        });
-      }
-    });
-    const emojiText = new Text(animal.emoji, emojiStyle);
-    emojiText.anchor.set(0.5);
-    emojiText.x = CARD_SIZE/2;
-    emojiText.y = CARD_SIZE/2 - 12;
-    const numString = animal.numbers.map(n => n === 100 ? '00' : n.toString().padStart(2,'0')).join(' ');
-    const numsText = new Text(numString, numsStyle);
-    numsText.anchor.set(0.5);
-    numsText.x = CARD_SIZE/2;
-    numsText.y = CARD_SIZE - 26;
-    card.addChild(emojiText, numsText);
-    centerContainer.addChild(card);
-    // Store center position (will transform later when used)
-    (gridPositions as any)[animal.id] = { cardX: card.x, cardY: card.y };
-  });
+function buildGrid(){
+  // Hide 5x5 animal grid: use center tickets panel instead
+  buildCenterTicketsPanel();
+}
+
+// Center stacked tickets panel globals (added for new middle view replacing grid)
+let centerTicketsContainer: Container | null = null;
+let centerTicketsMask: Graphics | null = null;
+let centerScrollY = 0; // vertical scroll offset
+let centerVisibleHeight = 0; // mask height (visible window)
+// Remember last gameplay (non-lobby) panel width so lobby uses identical width
+let lastCenterPanelWidth: number | null = null;
+// Full gameplay width (including potential side columns) captured to preserve appearance under lobby
+let baselineGameWidth: number | null = null;
+// Baseline gameplay dimensions for mobile stack (captured when not in lobby)
+let baselineGridWidth: number | null = null;
+let baselineGridHeight: number | null = null;
+// Track last center offsetX (inner content centering) for layout adjustments
+let lastCenterContentOffsetX: number = 0;
+// Fixed center panel width once established (width when first tickets created)
+let fixedCenterPanelWidth: number | null = null;
+
+// Lightweight refresh of middle ticket panel (center) preserving scroll position.
+function refreshCenterTickets(){
+  const prevScroll = centerScrollY;
+  buildCenterTicketsPanel();
+  // restore scroll (clamp inside current visible height)
+  centerScrollY = prevScroll;
+  if (centerTicketsContainer){
+    const contentH = centerTicketsContainer.height;
+    const minY = Math.min(0, centerVisibleHeight - contentH);
+    centerScrollY = Math.max(minY, Math.min(0, centerScrollY));
+    centerTicketsContainer.y = centerScrollY;
+  }
 }
 
 // Replace old left spacer build function with ticket panel sizing
@@ -737,13 +653,212 @@ function buildLeftSpacer() { // renamed function preserved for layout calls
   }
 }
 
-// Layout and sizing functions
+function buildCenterTicketsPanel(){
+  if (!app || !centerContainer) return;
+  if (!centerTicketsContainer){ centerTicketsContainer = new Container(); centerContainer.addChild(centerTicketsContainer); }
+  centerTicketsContainer.removeChildren();
+  const marginX = EDGE_TO_EDGE ? 0 : 20;
+  const deviceW = window.innerWidth;
+  // Allow logical panel width to use full available device width (minus margins) without artificial clamp.
+  const maxLogical = deviceW; // remove MOBILE_TARGET_WIDTH hard cap for consistent width across ticket counts
+  // Compute gridWidth the same way the results panel does, so center tickets match call boxes
+  const baseGridWidth = centerContainer.width || (CARD_SIZE * GRID_COLS + GRID_GAP * (GRID_COLS - 1));
+  const gridWidth = EDGE_TO_EDGE ? deviceW : Math.max(Math.min(deviceW - marginX*2, baseGridWidth), 320);
+  // contentPanelW is the actual width of ticket cards; centerContainer itself may span full width (deviceW)
+  let panelW: number; // full logical width used previously
+  let contentPanelW: number; // new inner card width (capped and centered)
+  // Consistent sizing: lock to previously seen width or a target max instead of stretching to full device width.
+  // Force panel width to exactly match current game width (call boxes width)
+  const TARGET_MAX = 1100;
+  fixedCenterPanelWidth = Math.max(420, Math.min(gridWidth, TARGET_MAX));
+  panelW = gridWidth;
+  baselineGameWidth = Math.max(baselineGameWidth || 0, panelW);
+  // Determine inner content width (do not exceed a comfortable max for readability)
+  const MAX_CONTENT_WIDTH = 1100;
+  // Make inner content width equal to the panel width to remove any horizontal offset
+  contentPanelW = Math.min(panelW, MAX_CONTENT_WIDTH);
+  const offsetX = Math.max(0, Math.floor((panelW - contentPanelW) / 2)); // center within full width
+  lastCenterContentOffsetX = offsetX;
+  // Resize renderer if panel exceeds current width
+  // Renderer width should at least fit the locked panel width; avoid shrinking beyond established width.
+  const desiredRendererW = panelW + marginX*2;
+  if (app.renderer.width < desiredRendererW){
+    app.renderer.resize(desiredRendererW, app.renderer.height);
+    console.log('[centerPanel] widened renderer to panel width', { desiredRendererW, panelW });
+  }
+  console.log('[centerPanel] CONSISTENT FIXED sizing', { panelW, contentPanelW, offsetX, fixedCenterPanelWidth, baselineGameWidth, rendererW: app.renderer.width });
+  const ticketH = TICKET_HEIGHT + 30;
+  tickets.forEach((ticket, idx) => {
+    const card = new Graphics();
+    card.roundRect(0,0,contentPanelW,ticketH,20);
+    card.fill({ color:0x232a34 });
+    card.stroke({ color: ticket.lastWin && ticket.lastWin>0 ? 0xffd54f : 0x2f3d4b, width: ticket.lastWin && ticket.lastWin>0 ? 3 : 2 });
+    card.x = offsetX; card.y = idx * (ticketH + 12);
+    const stakeStr = formatStakeValue(ticket.stake);
+    const headerStyle = new TextStyle({ fill:'#ffcc66', fontSize:16, fontFamily:'system-ui', fontWeight:'600' });
+    const winSuffix = ticket.lastWin && ticket.lastWin > 0 ? ` +${formatStakeValue(ticket.lastWin)}` : '';
+    const header = new Text(`${stakeStr}${winSuffix}`, headerStyle); header.anchor.set(0,0); header.x = 14; header.y = 8; card.addChild(header);
+    // Status badge
+    const statusStyle = new TextStyle({ fill:'#ffffff', fontSize:12, fontFamily:'system-ui', fontWeight:'600' });
+    const statusText = ticket.complete ? 'CONFIRMED' : 'IN-PROGRESS';
+    const statusColor = ticket.complete ? 0x2e7d32 : 0x607d8b;
+    const badge = new Graphics(); badge.roundRect(0,0,104,22,10); badge.fill({ color:statusColor }); badge.x = contentPanelW - 118; badge.y = 10; card.addChild(badge);
+    const badgeTxt = new Text(statusText, statusStyle); badgeTxt.anchor.set(0.5); badgeTxt.x = badge.x + 52; badgeTxt.y = badge.y + 11; card.addChild(badgeTxt);
+    // Slots
+    const slotSize = 44; const slotGap = 10; const totalSlotsWidth = slotSize*5 + slotGap*4; const startX = offsetX + (contentPanelW - totalSlotsWidth)/2; const startY = 38;
+    for (let i=0;i<5;i++){
+      const hasAnimal = i < ticket.animals.length;
+      const positional = hasAnimal && ticket.posMatches && ticket.posMatches[i];
+      const anyMatch = hasAnimal && ticket.anyMatches && ticket.anyMatches[i];
+      const slot = new Graphics(); slot.roundRect(0,0,slotSize,slotSize,12);
+      let fillColor = 0x1b222b;
+      if (hasAnimal) fillColor = 0x26313d;
+      if (anyMatch) fillColor = 0x5d4a1a;
+      if (positional) fillColor = 0x1e4d2b;
+      slot.fill({ color: fillColor });
+      slot.stroke({ color: positional ? 0x66bb6a : anyMatch ? 0xffd54f : 0x2f3d4b, width: 1 });
+      slot.x = startX + i*(slotSize + slotGap); slot.y = startY;
+      if (hasAnimal){
+        const a = animals.find(a=>a.id===ticket.animals[i]);
+        if (a){
+          const emo = new Text(a.emoji, new TextStyle({ fill:'#fff', fontSize:30 })); emo.anchor.set(0.5); emo.x=slotSize/2; emo.y=slotSize/2; slot.addChild(emo);
+          if (positional || anyMatch){
+            const markerChar = positional ? '\u2713' : '\u2605';
+            const marker = new Text(markerChar, new TextStyle({ fill: positional ? '#6ef392' : '#ffd54f', fontSize:16, fontWeight:'700' })); marker.anchor.set(1,0); marker.x = slotSize - 4; marker.y = 4; slot.addChild(marker);
+          }
+        }
+      }
+      card.addChild(slot);
+    }
+    // Win reflection / outcome line
+    if (ticket.complete) {
+      const outcomeY = 38 + 44 + 8; // below slots
+      let outcomeText: string;
+      let outcomeColor: string;
+      if (ticket.lastWin && ticket.lastWin > 0) {
+        outcomeText = `WIN ${formatStakeValue(ticket.lastWin)}`;
+        outcomeColor = '#ffd54f';
+        // Trophy icon
+        const trophy = new Text('🏆', new TextStyle({ fontSize: 20 }));
+        trophy.anchor.set(0,0.5); trophy.x = 14; trophy.y = outcomeY + 2; card.addChild(trophy);
+        const winGlow = new Graphics();
+        winGlow.roundRect(2,2,contentPanelW-4,ticketH-4,18);
+        winGlow.stroke({ color:0xffd54f, width:2 });
+        winGlow.alpha = 0.35; // subtle overlay
+        card.addChildAt(winGlow,0); // behind content
+      } else {
+        outcomeText = 'NO WIN';
+        outcomeColor = '#607d8b';
+      }
+      const outcomeStyle = new TextStyle({ fill: outcomeColor, fontSize: 14, fontFamily:'system-ui', fontWeight:'600' });
+      const outcome = new Text(outcomeText, outcomeStyle);
+      outcome.anchor.set(1,0.5); outcome.x = offsetX + contentPanelW - 14; outcome.y = outcomeY + 2; card.addChild(outcome);
+    }
+    centerTicketsContainer!.addChild(card);
+  });
+  const headerOffset = 0;
+  // If no tickets yet, pretend there are 5 to establish initial panel height and spacing
+  const initialCount = tickets.length === 0 ? 5 : tickets.length;
+  const contentHeight = initialCount * (ticketH + 12) - 12;
+  // Make the center panel fill the available vertical space of the CANVAS (renderer), not the window,
+  // so it fits the enforced 9:16 aspect without clipping
+  const canvasH = app.renderer.height;
+  centerVisibleHeight = Math.max(240, canvasH - BOTTOM_UI_HEIGHT - TOP_MARGIN - 60);
+  // During lobby, ensure visible height at least accommodates 5-ticket content to prevent perceived cropping
+  if (launchMenuActive) {
+    centerVisibleHeight = Math.max(centerVisibleHeight, contentHeight);
+  }
+  if (!centerTicketsMask){ centerTicketsMask = new Graphics(); centerContainer.addChild(centerTicketsMask); }
+  centerTicketsMask.clear();
+  // Mask only vertical clipping; widen horizontal to panelW
+  // Mask should match the full panel width so scrollable area equals game width
+  centerTicketsMask.rect(0, headerOffset, panelW, centerVisibleHeight);
+  centerTicketsMask.fill(0xffffff);
+  centerTicketsContainer!.mask = centerTicketsMask;
+  centerContainer.removeChildren();
+  centerContainer.addChild(centerTicketsContainer!, centerTicketsMask);
+  // Clamp scroll before applying
+  const minY = Math.min(0, centerVisibleHeight - contentHeight);
+  centerScrollY = Math.max(minY, Math.min(0, centerScrollY));
+  // Inner container anchored at 0 since cards already shifted by offsetX
+  // Align inner content with mask: place container at offsetX so drawn cards match mask edges
+  centerTicketsContainer!.x = offsetX; centerTicketsContainer!.y = headerOffset + centerScrollY;
+  // Ensure the big central ticket box is the interactive region
+  centerContainer.eventMode = 'static';
+  centerContainer.hitArea = new Rectangle(0, headerOffset, panelW, centerVisibleHeight);
+  console.log('[centerPanel-hitArea]', { x:0, y:headerOffset, w: panelW, h: centerVisibleHeight });
+  console.log('[centerPanel]', { launchMenuActive, panelW, rendererW: app.renderer.width, deviceW });
+}
+
+// (Grid hidden) See original buildGrid for sizing; this helper removed.
+
+// Center scroll interaction
+function attachCenterScroll(){
+  if (!centerContainer) return;
+  centerContainer.eventMode = 'static';
+  let dragging = false; let startY = 0; let startScrollY = 0;
+  centerContainer.on('pointerdown',(e:any)=>{ dragging = true; startY = e.globalY; startScrollY = centerScrollY; });
+  centerContainer.on('pointerup', ()=> dragging=false);
+  centerContainer.on('pointerupoutside', ()=> dragging=false);
+  centerContainer.on('pointermove',(e:any)=>{ if(!dragging) return; const dy = e.globalY - startY; centerScrollY = startScrollY + dy; const contentH = (centerTicketsContainer?.height||0); const minY = Math.min(0, centerVisibleHeight - contentH); centerScrollY = Math.max(minY, Math.min(0, centerScrollY)); if(centerTicketsContainer) centerTicketsContainer.y = centerScrollY; });
+  // Wheel support
+  window.addEventListener('wheel', (ev)=>{
+    if (!centerContainer || !centerTicketsContainer) return;
+    if (ev.deltaY === 0) return;
+    const contentH = centerTicketsContainer.height;
+    const minY = Math.min(0, centerVisibleHeight - contentH);
+    centerScrollY = Math.max(minY, Math.min(0, centerScrollY - ev.deltaY));
+    centerTicketsContainer.y = centerScrollY;
+  }, { passive:true });
+  const canvasEl = app?.canvas as HTMLCanvasElement | undefined;
+  if (canvasEl){
+    canvasEl.addEventListener('wheel', (ev)=>{
+      if (!centerContainer || !centerTicketsContainer) return;
+      if (ev.deltaY === 0) return;
+      const contentH = centerTicketsContainer.height;
+      const minY = Math.min(0, centerVisibleHeight - contentH);
+      centerScrollY = Math.max(minY, Math.min(0, centerScrollY - ev.deltaY));
+      centerTicketsContainer.y = centerScrollY;
+    }, { passive:true });
+  }
+}
+
+// (Duplicate postInit removed; center panel is hooked in original postInit)
+
 function layout() {
   if (!app || !leftContainer || !centerContainer || !rightContainer) return;
   let w = app.renderer.width;
   let h = app.renderer.height;
   const mobile = isMobileLayout();
   console.log('[layout] branch', mobile ? 'MOBILE' : 'DESKTOP', { w, h });
+  // Guard: if lobby active and we have a stored gameplay width, ensure renderer not narrower than baseline
+  if (launchMenuActive && lastCenterPanelWidth){
+    const minLogical = lastCenterPanelWidth + 40; // add some side breathing space
+    if (app.renderer.width < minLogical){
+      app.renderer.resize(minLogical, app.renderer.height);
+      w = app.renderer.width; h = app.renderer.height;
+      console.log('[layout] expanded renderer width for lobby baseline', { minLogical });
+    }
+  }
+  if (launchMenuActive && baselineGameWidth){
+    if (app.renderer.width < baselineGameWidth){
+      app.renderer.resize(baselineGameWidth, app.renderer.height);
+      w = app.renderer.width; h = app.renderer.height;
+      console.log('[layout] enforced baselineGameWidth', { baselineGameWidth });
+    }
+  }
+  if (!launchMenuActive){
+    // Capture widest seen width of center panel during gameplay for later lobby reuse
+    const currentCenterWidth = centerTicketsContainer?.width || centerContainer.width || 0;
+    if (currentCenterWidth > (lastCenterPanelWidth||0)){ lastCenterPanelWidth = currentCenterWidth; }
+    if (app.renderer.width > (baselineGameWidth||0)){ baselineGameWidth = app.renderer.width; }
+    // Capture grid height/width snapshot (mobile baseline). Use centerContainer bounds or fallback.
+    const currentGridW = centerContainer.width || currentCenterWidth;
+    const currentGridH = centerContainer.height || 0;
+    if (currentGridW && currentGridW > (baselineGridWidth||0)) baselineGridWidth = currentGridW;
+    if (currentGridH && currentGridH > (baselineGridHeight||0)) baselineGridHeight = currentGridH;
+    console.log('[layout gameplay width capture]', { lastCenterPanelWidth, baselineGameWidth, rendererW: app.renderer.width });
+  }
   
   if (mobile) {
     // Add body class for mobile styling hooks (once)
@@ -752,39 +867,39 @@ function layout() {
     // First ensure grid is at scale 1
     centerContainer.scale.set(1);
 
-    // Build panels FIRST with correct dimensions before positioning
-    buildLeftSpacer();
-    buildRightSlots();
+  // Build only results panel; hide legacy bottom tickets panel in mobile
+  leftContainer.visible = false;
+  buildRightSlots();
 
     // Constrain grid width to device viewport and derive aligned width for sections
-    const marginX = 20;
+    const marginX = EDGE_TO_EDGE ? 0 : 20;
     const deviceW = window.innerWidth;
-    let baseGridWidth = centerContainer.width;
-    let gridWidth = Math.max(Math.min(deviceW - marginX * 2, baseGridWidth), 320);
-    let gridHeight = centerContainer.height;
+  // When lobby active centerContainer may be empty/cleared; fall back to baseline captured dimensions
+  let baseGridWidth = centerContainer.width; // after widening center panel
+  let gridWidth = EDGE_TO_EDGE ? deviceW : Math.max(Math.min(deviceW - marginX * 2, baseGridWidth), 320);
+  let gridHeight = launchMenuActive && baselineGridHeight ? baselineGridHeight : centerContainer.height;
 
     // Ensure grid fits horizontally: apply width-based scaling if needed
-    const maxGridWidth = deviceW - marginX * 2;
-    if (baseGridWidth > maxGridWidth) {
+    const maxGridWidth = EDGE_TO_EDGE ? deviceW : (deviceW - marginX * 2);
+    if (!EDGE_TO_EDGE && baseGridWidth > maxGridWidth && !launchMenuActive) { // avoid shrinking during lobby when margins active
       const scaleW = Math.max(0.45, Math.min(1, maxGridWidth / baseGridWidth));
       centerContainer.scale.set(scaleW);
       // Recompute grid dimensions after width scaling
       baseGridWidth = centerContainer.width;
-      gridWidth = Math.max(Math.min(deviceW - marginX * 2, baseGridWidth), 320);
+      gridWidth = EDGE_TO_EDGE ? deviceW : Math.max(Math.min(deviceW - marginX * 2, baseGridWidth), 320);
       gridHeight = centerContainer.height;
       // Rebuild results panel to align to new gridWidth
       buildRightSlots();
     }
     
-  const ticketPanelHeight = 28 + TICKET_HEIGHT; // header + ticket height
   const resultPanelHeight = 30 + 100; // header + slot height (approx; slots sized in buildRightSlots)
   const gap = 15; // gap between sections
-  let totalHeight = ticketPanelHeight + gap + gridHeight + gap + resultPanelHeight;
+  let totalHeight = gridHeight + gap + resultPanelHeight;
 
   // If total content exceeds viewport height, scale down the grid (not tickets/results) to fit
   const availableViewportH = window.innerHeight - BOTTOM_UI_HEIGHT - TOP_MARGIN - 40;
     if (totalHeight > availableViewportH) {
-      const maxGridHeight = Math.max(120, availableViewportH - (ticketPanelHeight + resultPanelHeight + gap * 2));
+  const maxGridHeight = Math.max(120, availableViewportH - (resultPanelHeight + gap));
       const scaleY = Math.min(1, Math.max(0.45, maxGridHeight / gridHeight));
       // Preserve any width scaling already applied by using uniform scaling to the smaller
       const currentScale = centerContainer.scale.x;
@@ -792,22 +907,31 @@ function layout() {
       centerContainer.scale.set(finalScale);
       // Recompute grid dimensions after scaling
       baseGridWidth = centerContainer.width;
-      gridWidth = Math.max(Math.min(deviceW - marginX * 2, baseGridWidth), 320);
+        gridWidth = EDGE_TO_EDGE ? deviceW : Math.max(Math.min(deviceW - marginX * 2, baseGridWidth), 320);
       gridHeight = centerContainer.height;
-      totalHeight = ticketPanelHeight + gap + gridHeight + gap + resultPanelHeight;
+  totalHeight = gridHeight + gap + resultPanelHeight;
       // Rebuild results panel to align to new gridWidth
       buildRightSlots();
     }
     
   // Anchor at top-center: compute tickets fill height to occupy space down to UI
-  const remainingBelowGrid = Math.max(0, availableViewportH - (resultPanelHeight + gap + gridHeight));
-    // Fill space for tickets list (beneath header) and leave 50px buffer for UI at the end
-    const UI_BUFFER = 50;
-  mobileTicketsFillHeight = Math.max(TICKET_HEIGHT, (remainingBelowGrid - gap) - UI_BUFFER - 50);
+  // No bottom tickets panel in mobile; center panel replaces it. Remove fill height computation.
+  mobileTicketsFillHeight = null;
 
     // Resize renderer to fully contain mobile content to avoid clipping
-    const desiredW = gridWidth + 40;
-  const desiredH = (resultPanelHeight + gap + gridHeight + gap + (28 + (mobileTicketsFillHeight ?? TICKET_HEIGHT))) + TOP_MARGIN + BOTTOM_UI_HEIGHT + 40;
+    // Desired canvas width: full grid width plus small buffer when not edge-to-edge
+  // Logical width never exceeds MOBILE_TARGET_WIDTH
+  // Enforce global 9:16 aspect ratio in mobile: choose width/height based on viewport
+  const vw = window.innerWidth;
+  const vh = window.innerHeight;
+  const aspectWOverH = 9/16;
+  // Compute max width that fits within viewport while maintaining 9:16
+  const maxWByHeight = Math.floor(vh * aspectWOverH);
+  const targetW = Math.min(vw, maxWByHeight);
+  const desiredWRaw = EDGE_TO_EDGE ? gridWidth : (gridWidth + 40);
+  // Pick the lesser of computed targetW and layout-derived desiredWRaw to avoid over-expansion
+  const desiredW = Math.min(desiredWRaw, targetW);
+  let desiredH = Math.round(desiredW * (16/9));
     if (desiredW !== w || desiredH !== h) {
       app.renderer.resize(desiredW, desiredH);
       w = desiredW; h = desiredH;
@@ -815,24 +939,24 @@ function layout() {
   // Anchor start at top margin, with an extra drop for visual spacing (now 35px)
   const startY = TOP_MARGIN + 35;
     
-    // All elements centered horizontally at the same X
-  const centerX = (w - gridWidth) / 2;
+    // All elements: center inner content horizontally. For edge-to-edge we still center inner content width.
+  // Full horizontal centering: use renderer width not grid width so all columns center
+  const centerXRaw = (w - gridWidth) / 2;
+  const centerX = centerXRaw;
     
     // Position results above grid (using rightContainer)
     // Results centered to gridWidth (buildRightSlots already sizes to gridWidth)
-    rightContainer.x = centerX;
+  rightContainer.x = centerXRaw;
     rightContainer.y = startY;
 
     // Position grid below results
-    centerContainer.x = centerX;
+  centerContainer.x = centerXRaw;
     centerContainer.y = startY + resultPanelHeight + gap;
 
-    // Position tickets below grid (using leftContainer)
-    // Tickets may be wider than grid if not constrained; center within gridWidth
-    leftContainer.x = centerX;
-  leftContainer.y = centerContainer.y + gridHeight + gap;
-  // Rebuild tickets with the new fill height
-  buildLeftSpacer();
+    // Hide legacy bottom tickets panel
+    leftContainer.x = 0;
+    leftContainer.y = 0;
+    leftContainer.visible = false;
     
     console.log('[mobile layout]', {
       centerX,
@@ -840,7 +964,10 @@ function layout() {
       gridY: centerContainer.y,
       ticketsY: leftContainer.y,
       gridWidth,
-      totalHeight
+      totalHeight,
+      baselineGridWidth,
+      baselineGridHeight,
+      launchMenuActive
     });
     
   } else {
@@ -884,10 +1011,12 @@ function layout() {
     // Calculate logical content width/height for mobile stack
     const logicalContentWidth = w;
     const logicalContentHeight = h;
-    const wScale = vw / logicalContentWidth;
-    const hScale = vh / logicalContentHeight;
-  cssScale = Math.min(1, Math.max(0.5, Math.min(wScale, hScale)));
+  const wScale = vw / logicalContentWidth;
+  // Width-only scaling: ignore height reduction so taller content does not shrink width.
+  cssScale = Math.min(1.3, Math.max(0.5, wScale));
   canvas.style.transformOrigin = 'top center';
+  // Center canvas horizontally in viewport (already flex centered root?) fallback ensure
+  canvas.style.margin = '0 auto';
     canvas.style.transform = `scale(${cssScale})`;
     canvas.style.width = `${app.renderer.width}px`; // keep original logical size
     canvas.style.height = `${app.renderer.height}px`;
@@ -920,12 +1049,12 @@ function buildRightSlots() {
   
   if (isMobileLayout()) {
     // Mobile: horizontal results below grid
-    const marginX = 20;
+    const marginX = EDGE_TO_EDGE ? 0 : 20;
     const deviceW = window.innerWidth;
     const baseGridWidth = centerContainer.width || (CARD_SIZE * GRID_COLS + GRID_GAP * (GRID_COLS - 1));
-    const gridWidth = Math.max(Math.min(deviceW - marginX*2, baseGridWidth), 320);
+    const gridWidth = EDGE_TO_EDGE ? deviceW : Math.max(Math.min(deviceW - marginX*2, baseGridWidth), 320);
     
-    console.log('[buildRightSlots mobile]', { gridWidth });
+    console.log('[buildRightSlots mobile]', { gridWidth, deviceW, edgeToEdge: EDGE_TO_EDGE });
     
     const header = new Text('Game Result', new TextStyle({ fill:'#ffcc66', fontSize:16, fontFamily:'system-ui', fontWeight:'600' }));
     header.anchor.set(0.5,0);
@@ -945,7 +1074,7 @@ function buildRightSlots() {
   const totalSlotsWidth = slotWidth * resultsCount + gap * (resultsCount - 1);
     const startX = (gridWidth - totalSlotsWidth) / 2;
     
-    console.log('[buildRightSlots mobile slots]', { totalSlotsWidth, startX, slotCount });
+    console.log('[buildRightSlots mobile slots]', { totalSlotsWidth, startX, slotCount, slotWidth, gap });
     
     for (let i=0;i<slotCount;i++) {
       const slot = new Graphics();
@@ -1013,6 +1142,9 @@ clearBtn?.addEventListener('click', ()=>{ if (!clearBtn || clearBtn.disabled) re
 // Random ticket creation button (moved earlier to avoid TDZ before initial state refresh)
 const randomBtn = document.getElementById('random-btn') as HTMLButtonElement | null;
 const playHtmlBtn = document.getElementById('play-btn') as HTMLButtonElement | null;
+if (playHtmlBtn){
+  playHtmlBtn.style.display = 'none';
+}
 function attachButtonBounce(btn:HTMLButtonElement|null){
   if (!btn) return;
   btn.addEventListener('click', ()=>{
@@ -1201,177 +1333,7 @@ function computeTicketWin(ticket: Ticket, drawnAnimalIds: (number|null)[]): { mu
   }
   return { multiplier: mult, posMatches, anyMatches };
 }
-if (playBtn) {
-  playBtn.addEventListener('click', async () => {
-    if (isPlaying) return;
-    // Remove any unconfirmed (in-progress) tickets before starting play
-    if (tickets.some(t=>!t.complete)){
-      tickets = tickets.filter(t=>t.complete);
-      editingTicketId = null; // ensure no dangling editing reference
-      renderTickets(); buildGrid(); layout();
-    }
-    isPlaying = true; updatePlayButtonState(); updateClearButtonState();
-    // Deduct stakes for all confirmed tickets at the moment play begins
-    const stakeCost = totalConfirmedStake();
-    if (stakeCost > 0) {
-      balance -= stakeCost;
-      if (balance < 0) balance = 0; // prevent negative display (assumption)
-      refreshBalance();
-    }
-    // Reset previous win state so tickets start clean (no stars/ticks/green or win amounts)
-    tickets.forEach(t => { delete t.lastWin; t.posMatches = undefined; t.anyMatches = undefined; });
-    renderTickets();
-    // Clear previous slot content except numerals
-    resultSlots.forEach(slot => { while (slot.children.length > 1) slot.removeChild(slot.children[slot.children.length - 1]); });
-    // Precompute results (add bonus flag with probability)
-    const results: { number: string; animal: typeof animals[number] | null; bonus?:boolean }[] = [];
-    for (let i=0;i<5;i++) {
-      const n = Math.floor(Math.random()*10000).toString().padStart(4,'0');
-      const lastTwo = n.slice(2);
-      const animal = getAnimalByTwoDigits(lastTwo);
-      const bonus = Math.random() < BONUS_FLAG_PROB;
-      results.push({ number: n, animal, bonus });
-    }
-    // Progressive reveal & live match updates with pre-reveal shimmer
-    const progressiveDrawn: (number|null)[] = [null,null,null,null,null];
-  const revealDelays = [650, 720, 780, 900]; // progressive build-up for first 4 slots
-    for (let revealIndex=0; revealIndex<results.length; revealIndex++) {
-      const res = results[revealIndex];
-      const slot = resultSlots[revealIndex]; if (!slot) continue;
-      const isFinal = revealIndex === results.length - 1;
-  const emojiStyle = new TextStyle({ fill:'#fff', fontSize: Math.min(64, slot.height*0.45), fontFamily:'system-ui' });
-  const numStyle = new TextStyle({ fill:'#ffc107', fontSize: Math.min(28, slot.height*0.25), fontFamily:'monospace' });
-  let emoji: Text; let numberText: Text; let bonusIcon: Graphics | null = null;
-      if (!isFinal){
-        // Shimmer & animated reveal for first 4 slots
-        const shimmer = new Graphics();
-  const slotW = slot.width; const slotH = slot.height;
-        shimmer.rect(0,0,60,slotH);
-        shimmer.fill({ color:0xffffff, alpha:0.12 });
-        shimmer.x = -70; shimmer.y = 0; slot.addChild(shimmer);
-        let sf=0; const sDur=40; app.ticker.add(function shimmerTick(){
-          sf++; const p = sf/sDur; shimmer.x = -70 + (slotW + 140)*p; shimmer.alpha = 0.18*(1 - Math.abs(p-0.5)*1.9); if (sf>=sDur){ app.ticker.remove(shimmerTick); shimmer.destroy(); }
-        });
-  emoji = new Text(res.animal ? res.animal.emoji : '❓', emojiStyle); emoji.anchor.set(0.5); emoji.x = slotW/2; emoji.y = slotH/2 - 10; emoji.alpha = 0; emoji.scale.set(0.2);
-  numberText = new Text(res.number, numStyle); numberText.anchor.set(0.5); numberText.x = slotW/2; numberText.y = slotH - 5 - (numStyle.fontSize as number)/2; numberText.alpha = 0; numberText.scale.set(0.2);
-        // Bonus icon (small star in corner) if bonus
-        if (res.bonus) {
-          bonusIcon = new Graphics();
-          bonusIcon.star(0,0,5,14,6); // Pixi Graphics star
-          bonusIcon.fill({ color:0x000000, alpha:0.85 });
-          bonusIcon.stroke({ color:0xffd54f, width:2 });
-          bonusIcon.x = slotW - 26; bonusIcon.y = 14; bonusIcon.scale.set(0.55); bonusIcon.alpha = 0; // fade in with emoji
-          slot.addChild(bonusIcon);
-        }
-        slot.addChild(emoji, numberText);
-        const startTime = performance.now(); const duration = 350;
-        function animate(now:number){
-          const t = Math.min(1, (now - startTime)/duration); const ease = 1 - Math.pow(1 - t, 3);
-          const scale = 0.2 + (1 - 0.2) * ease; emoji.alpha = ease; numberText.alpha = ease; emoji.scale.set(scale); numberText.scale.set(scale);
-          if (bonusIcon){ bonusIcon.alpha = ease*0.95; }
-          if (t < 1) requestAnimationFrame(animate);
-        }
-        requestAnimationFrame(animate);
-      } else {
-        // Instant final reveal (no shimmer, no easing) immediately after shake completes
-  emoji = new Text(res.animal ? res.animal.emoji : '❓', emojiStyle); emoji.anchor.set(0.5); emoji.x = slot.width/2; emoji.y = slot.height/2 - 10; emoji.alpha = 1; emoji.scale.set(1);
-  numberText = new Text(res.number, numStyle); numberText.anchor.set(0.5); numberText.x = slot.width/2; numberText.y = slot.height - 5 - (numStyle.fontSize as number)/2; numberText.alpha = 1; numberText.scale.set(1);
-        if (res.bonus){
-          bonusIcon = new Graphics();
-          bonusIcon.star(0,0,5,16,7); bonusIcon.fill({ color:0x000000, alpha:0.85 }); bonusIcon.stroke({ color:0xffd54f, width:2 });
-          bonusIcon.x = slot.width - 26; bonusIcon.y = 14; bonusIcon.scale.set(0.6); bonusIcon.alpha = 1;
-          slot.addChild(bonusIcon);
-        }
-        slot.addChild(emoji, numberText);
-      }
-      // Record drawn result and update ticket match markers (immediate for final, after animation start for others)
-      progressiveDrawn[revealIndex] = res.animal ? res.animal.id : null;
-      tickets.filter(t=>t.complete).forEach(ticket => {
-        const { posMatches, anyMatches } = computeTicketWin(ticket, progressiveDrawn);
-        ticket.posMatches = posMatches; ticket.anyMatches = anyMatches;
-        // Do NOT assign lastWin yet (only after full draw)
-        // Compute a provisional potential win for ordering (stake * multiplier using current reveals)
-        const { multiplier } = computeTicketWin(ticket, progressiveDrawn);
-        ticket.tempPotentialWin = ticket.stake * multiplier;
-      });
-      // Reorder tickets based on current potential win (descending). Incomplete tickets sink with potential 0.
-      tickets.sort((a,b)=>{
-        const aw = a.tempPotentialWin || 0;
-        const bw = b.tempPotentialWin || 0;
-        if (aw === bw){ return a.id - b.id; }
-        return bw - aw;
-      });
-      renderTickets();
-      if (revealIndex < results.length - 1){
-        // Uniform delays: slots 1-4 each wait the same baseDelay before proceeding.
-        if (revealIndex < results.length - 2){
-          const d = revealDelays[revealIndex] || 750;
-          await new Promise(r=> setTimeout(r, d));
-        } else if (revealIndex === results.length - 2){
-          // After revealing slot 4: immediately start shake (no extra delay); ramp amplitude up from 0 then down.
-          const finalSlot = resultSlots[results.length -1];
-          if (finalSlot){
-            await new Promise<void>(resolve => {
-              let frames=0; const totalFrames = 180; // target ~3s at 60fps
-              const origX = finalSlot.x; const origY = finalSlot.y;
-              function drumRoll(){
-                frames++;
-                const p = frames/totalFrames;
-                const phase = Math.pow(p, 1.8) * 90; // accelerating frequency
-                // Ramp amplitude: grow first third, stay near peak middle, decay final third. Overall intensity halved.
-                let ampEnvelope: number;
-                if (p < 0.33){
-                  ampEnvelope = p / 0.33; // 0 -> 1
-                } else if (p < 0.66){
-                  ampEnvelope = 1 - (p-0.33)/0.66 * 0.15; // slight softening mid
-                } else {
-                  const tail = (p-0.66)/0.34; ampEnvelope = 1 - tail; // decay 1 -> 0
-                }
-                const baseAmp = 6; // half of previous ~12
-                const amplitude = baseAmp * ampEnvelope + 1.2; // small floor to avoid total stillness
-                // Parallax jitter removed in clean build
-                finalSlot.x = origX + Math.sin(phase) * amplitude * (Math.random()>0.55?1:-1);
-                finalSlot.y = origY + Math.cos(phase*1.25) * amplitude * 0.35;
-                if (frames>=totalFrames){
-                  app.ticker.remove(drumRoll);
-                  finalSlot.x = origX; finalSlot.y = origY;
-                  // Parallax final shake reset removed
-                  resolve(); // end shake -> immediately continue to final reveal
-                }
-              }
-              app.ticker.add(drumRoll);
-            });
-          } else {
-            // Fallback if slot missing: approximate shake duration then proceed
-            await new Promise(r=> setTimeout(r, 3000));
-          }
-        }
-      }
-    }
-    // Final payout computation using full progressiveDrawn array
-    let totalWin = 0;
-    tickets.filter(t=>t.complete).forEach(ticket => {
-      const { multiplier, posMatches, anyMatches } = computeTicketWin(ticket, progressiveDrawn);
-      ticket.posMatches = posMatches; ticket.anyMatches = anyMatches; ticket.lastWin = ticket.stake * multiplier; totalWin += ticket.lastWin;
-    });
-    if (totalWin > 0) {
-      animateBalanceTo(balance + totalWin);
-      spawnWinPopup(totalWin);
-  const winners = tickets.filter(t=>t.lastWin && t.lastWin>0);
-  winners.forEach((t,i)=> { spawnTicketWinParticles(t); spawnCoinTravel(t,i); });
-    }
-    // BONUS TRIGGER: count bonus flags in results
-    const bonusCount = results.filter(r=>r.bonus).length;
-    console.log('[bonus] round complete bonusCount=', bonusCount, 'flags:', results.map(r=>r.bonus));
-    if (bonusCount >= 3){
-      // Initiate bonus round flow (scaffold)
-      startBonusRound(results.filter(r=>r.bonus).map(r=>r.animal?.id || null));
-      return; // bonus flow will handle resetting isPlaying when done
-    }
-    renderTickets();
-      isPlaying = false; updatePlayButtonState(); updateClearButtonState();
-  });
-}
+// Play button removed; initiate rounds elsewhere (e.g., auto after confirmation) so listener stripped.
 
 // --- Bonus Round System (25-Box Selection) ---
 /**
@@ -1469,7 +1431,7 @@ function showBonusBoard(){
   const boardW = cols*cellW + (cols-1)*gap; const boardH = rows*cellH + (rows-1)*gap;
   const startX = (app.renderer.width - boardW)/2; const startY = (app.renderer.height - boardH)/2;
   const title = new Text('BONUS SELECTION', new TextStyle({ fill:'#ffcc66', fontSize:30, fontWeight:'700', fontFamily:'system-ui' })); title.anchor.set(0.5); title.x = app.renderer.width/2; title.y = startY - 80; bonusContainer.addChild(title);
-  const instr = new Text('Pick 5 boxes', new TextStyle({ fill:'#ffffff', fontSize:20, fontFamily:'system-ui' })); instr.anchor.set(0.5); instr.x = app.renderer.width/2; instr.y = startY - 44; bonusContainer.addChild(instr);
+  const instr = new Text('Pick 5 boxes', new TextStyle({ fill:'#ffffff', fontSize:20, fontFamily:'system-ui' })); instr.anchor.set(0.5); instr.x = app.renderer.width/2; instr.y = title.y + 44; bonusContainer.addChild(instr);
   const boxRefs: Graphics[] = [];
   bonusSelectionNumbers.forEach((num, idx)=>{
     const r = Math.floor(idx/cols); const c = idx%cols;
@@ -1721,7 +1683,7 @@ function cleanupBonus(){
   const contentToFade: (Container|Graphics)[] = [];
   if (bonusContainer) contentToFade.push(bonusContainer);
   if (bonusBackdrop) contentToFade.push(bonusBackdrop);
-  let frame=0; const fadeFrames=80; app.ticker.add(function contentFade(){
+  let frame=0; const fadeFrames = 80; app.ticker.add(function contentFade(){
     frame++; const rawP = frame/fadeFrames; const p = rawP*rawP*rawP; // cubic accelerate out
     contentToFade.forEach(el => { el.alpha = 1 - p; });
     if (frame>=fadeFrames){
@@ -1733,8 +1695,8 @@ function cleanupBonus(){
       // Now fade out overlay itself
       if (bonusOverlay){
         let of=0; const odur=80; const startAlpha = bonusOverlay.alpha; app.ticker.add(function overlayFade(){
-          of++; const opRaw = of/odur; const op = 1 - Math.pow(1 - opRaw, 3);
-          bonusOverlay!.alpha = startAlpha*(1 - op);
+          of++; const p = 1 - Math.pow(1 - of/odur, 3);
+          bonusOverlay!.alpha = startAlpha*(1 - p);
           if (of>=odur){
             app.ticker.remove(overlayFade);
             bonusOverlay?.destroy(); bonusOverlay=null; bonusActive=false; isPlaying=false;
@@ -1810,17 +1772,17 @@ function spawnTicketWinParticles(ticket:Ticket){
     const life = 40 + Math.random()*18;
     const spin = (Math.random()-0.5)*0.25;
     let f=0; app.stage.addChild(star);
-    app.ticker.add(function tick(){
+    app.ticker.add(function particleTick(){
       f++; const p = f/life;
       star.x += Math.cos(angle)*speed; star.y += Math.sin(angle)*speed*0.85 - 0.04*f;
       star.rotation += spin;
       star.scale.set(1 - p*0.6);
       star.alpha = 0.95*(1-p);
-      if (f>=life){ app.ticker.remove(tick); star.destroy(); }
+      if (f>=life){ app.ticker.remove(particleTick); star.destroy(); }
     });
   }
 }
-// Coin travel animation from winning ticket to balance display (separate from particle burst)
+
 function spawnCoinTravel(ticket:Ticket, indexInWinners:number){
   const idx = tickets.indexOf(ticket); if (idx === -1) return;
   const panelWidth = SIDE_COLUMN_WIDTH;
@@ -1838,15 +1800,12 @@ function spawnCoinTravel(ticket:Ticket, indexInWinners:number){
   const cpX = (startX + endX)/2 + 50;
   const cpY = Math.min(startY,endY) - 140;
   const coin = new Graphics();
-  coin.circle(0,0,12);
-  coin.fill({ color:0xffd54f });
-  coin.stroke({ color:0x9e7b16, width:3 });
+  coin.circle(0,0,12); coin.fill({ color:0xffd54f }); coin.stroke({ color:0x9e7b16, width:3 });
   coin.x = startX; coin.y = startY; coin.alpha = 0; coin.scale.set(0.85);
   app.stage.addChild(coin);
   let f=0; const dur=120; const startDelay = indexInWinners * 18; f = -startDelay;
   app.ticker.add(function coinTick(){
-    f++;
-    if (f < 0) return;
+    f++; if (f < 0) return;
     const t = f/dur;
     const ease = t < 0.5 ? 2*t*t : 1 - Math.pow(-2*t+2,2)/2;
     const bx = (1-ease)*(1-ease)*startX + 2*(1-ease)*ease*cpX + ease*ease*endX;
@@ -1855,11 +1814,7 @@ function spawnCoinTravel(ticket:Ticket, indexInWinners:number){
     coin.alpha = Math.min(1, t*2);
     coin.rotation += 0.35;
     coin.scale.set(0.85 + 0.18*ease);
-    if (f >= 0 && f % 9 === 0){
-      const spark = new Graphics(); spark.circle(0,0,3); spark.fill({ color:0xfff6c2 }); spark.x = coin.x; spark.y = coin.y; spark.alpha=0.9; app.stage.addChild(spark);
-      let sf=0; const sl=30; app.ticker.add(function sparkTick(){ sf++; spark.alpha = 0.9*(1 - sf/sl); spark.scale.set(1 + sf/sl*1.4); if (sf>=sl){ app.ticker.remove(sparkTick); spark.destroy(); } });
-    }
-    if (f>=dur){
+    if (f >= dur){
       app.ticker.remove(coinTick);
       let fade=0; const fadeDur=20; app.ticker.add(function fadeCoin(){ fade++; coin.alpha = 1 - fade/fadeDur; if (fade>=fadeDur){ app.ticker.remove(fadeCoin); coin.destroy(); } });
     }
@@ -1877,3 +1832,227 @@ stakeMinusBtn?.addEventListener('click',()=>{ if(stakeIndex > 0) stakeIndex--; r
 refreshStakeDisplay();
 
 
+// --- Launch Ticket Selection Menu ---
+let launchMenuActive = false;
+let launchOverlay: Graphics | null = null;
+let launchContainer: Container | null = null;
+function showLaunchTicketMenu(){
+  if (!app || launchMenuActive) return;
+  launchMenuActive = true;
+  // Reset fixed center width so each new session can recalc based on current viewport
+  fixedCenterPanelWidth = null;
+  // Capture full gameplay width BEFORE clearing tickets (use renderer width as baseline)
+  baselineGameWidth = app.renderer.width;
+  if (!lastCenterPanelWidth){ lastCenterPanelWidth = centerTicketsContainer?.width || null; }
+  clearTickets();
+  // Create dark overlay backdrop (fade in) if not existing
+  launchOverlay = new Graphics();
+  launchOverlay.rect(0,0,app.renderer.width, app.renderer.height);
+  launchOverlay.fill({ color:0x000000, alpha:0.0 });
+  launchOverlay.zIndex = 900;
+  app.stage.addChild(launchOverlay);
+  // Prepare underlying center panel widened BEFORE fade so user sees correct width while menu appears
+  buildCenterTicketsPanel();
+  layout();
+  console.log('[launchMenu] after initial center rebuild width=', centerTicketsContainer?.width, 'rendererW=', app.renderer.width);
+  // Fade in overlay then build menu content
+  let f=0; const dur=70; app.ticker.add(function lobbyFade(){
+    f++; const p = f/dur; const ease = 1 - Math.pow(1 - p, 3);
+    if (launchOverlay) launchOverlay.alpha = 0.78 * ease; // target alpha
+    if (f>=dur){ app.ticker.remove(lobbyFade); buildLaunchMenuContent(); layout(); }
+  });
+}
+
+function buildLaunchMenuContent(){
+  launchContainer = new Container(); launchContainer.zIndex = 901; launchContainer.alpha = 0; app.stage.addChild(launchContainer);
+  // Derive baseline gameplay width
+  const gameWidthCandidates = [lastCenterPanelWidth||0, baselineGameWidth||0, app.renderer.width];
+  let gameWidth = Math.max(...gameWidthCandidates);
+  if (gameWidth === 0) gameWidth = Math.max(360, Math.min(window.innerWidth - 40, 820));
+  // Full-width background bar matching gameplay width for visual continuity
+  const bg = new Graphics();
+  const bgX = (app.renderer.width - gameWidth)/2; // center
+  const bgY = 0;
+  const bgH = app.renderer.height; // cover full vertical for dim backdrop within game span
+  bg.rect(0,0,gameWidth,bgH);
+  bg.fill({ color:0x0d1114, alpha:0.86 });
+  bg.x = bgX; bg.y = bgY; bg.zIndex = 0;
+  launchContainer.addChild(bg);
+  // Inner panel (ticket selection UI) centered inside gameplay width
+  const panelW = Math.min(640, Math.max(360, Math.floor(gameWidth*0.72)));
+  const panelH = 380;
+  const panel = new Graphics(); panel.roundRect(0,0,panelW,panelH,22); panel.fill({ color:0x1a2027, alpha:0.95 }); panel.stroke({ color:0x394653, width:3 });
+  panel.x = bgX + (gameWidth - panelW)/2; panel.y = (app.renderer.height-panelH)/2;
+  launchContainer.addChild(panel);
+  console.log('[lobby panels]', { gameWidth, rendererW: app.renderer.width, panelW, bgX, panelX: panel.x });
+  const title = new Text('Select Tickets', new TextStyle({ fill:'#ffcc66', fontSize:26, fontWeight:'700', fontFamily:'system-ui' }));
+  title.anchor.set(0.5); title.x = panel.x + panelW/2; title.y = panel.y + 28; launchContainer.addChild(title);
+  const subtitle = new Text('Choose how many tickets to start with', new TextStyle({ fill:'#cfd8dc', fontSize:16, fontFamily:'system-ui' }));
+  subtitle.anchor.set(0.5); subtitle.x = title.x; subtitle.y = title.y + 28; launchContainer.addChild(subtitle);
+  // Options
+  const options: {label:string; tickets:number}[] = [
+    { label: '1 Ticket', tickets: 1 },
+    { label: '2 Tickets', tickets: 2 },
+    { label: '3 Tickets', tickets: 3 },
+    { label: '4 Tickets', tickets: 4 },
+    { label: '1 Strip (5 tickets)', tickets: 5 },
+    { label: '2 Strips (10 tickets)', tickets: 10 },
+  ];
+  const cols = 2; const gapX = 16; const gapY = 14; const btnW = (panelW - 40 - gapX)/cols; const btnH = 52;
+  const startX = panel.x + 20; const startY = panel.y + 90;
+  options.forEach((opt, i)=>{
+    const c = i % cols; const r = Math.floor(i/cols);
+    const btn = new Graphics(); btn.roundRect(0,0,btnW,btnH,12); btn.fill({ color:0x26313d }); btn.stroke({ color:0x445364, width:2 });
+    btn.x = startX + c*(btnW + gapX); btn.y = startY + r*(btnH + gapY);
+  const isDisabled = opt.tickets === 10; // disable 2 strips (10 tickets)
+  btn.eventMode='static'; btn.cursor = isDisabled ? 'not-allowed' : 'pointer';
+  if (isDisabled) { btn.alpha = 0.45; }
+    const label = new Text(opt.label, new TextStyle({ fill:'#ffffff', fontSize:16, fontWeight:'600', fontFamily:'system-ui' })); label.anchor.set(0.5); label.x = btnW/2; label.y = btnH/2; btn.addChild(label);
+    let hover=false; app.ticker.add(function hoverTick(){ if (btn.destroyed){ app.ticker.remove(hoverTick); return; } const target = hover?1.04:1; btn.scale.x += (target - btn.scale.x)*0.15; btn.scale.y = btn.scale.x; });
+    btn.on('pointerover',()=> hover=true); btn.on('pointerout',()=> hover=false);
+  if (!isDisabled){ btn.on('pointertap',()=> confirmStakeFor(opt.tickets)); }
+    launchContainer!.addChild(btn);
+  });
+  // Fade in container
+  let f=0; const dur=40; app.ticker.add(function contIn(){ f++; const p=f/dur; const ease = 1 - Math.pow(1 - p, 3); launchContainer!.alpha = ease; if (f>=dur){ app.ticker.remove(contIn); } });
+}
+
+function confirmStakeFor(ticketCount:number){
+  if (!launchContainer) return;
+  // Clear previous confirm UI if any
+  const prev = launchContainer.children.find(ch => (ch as any).__confirmPanel);
+  if (prev) launchContainer.removeChild(prev);
+  const stakeEach = getCurrentStake();
+  const total = stakeEach * ticketCount;
+  const panelW = Math.min(520, Math.max(360, Math.floor(app.renderer.width*0.7)));
+  const panelH = 160;
+  const panel = new Graphics(); (panel as any).__confirmPanel = true; panel.roundRect(0,0,panelW,panelH,16); panel.fill({ color:0x11161b, alpha:0.96 }); panel.stroke({ color:0x394653, width:3 });
+  panel.x = (app.renderer.width-panelW)/2; panel.y = (app.renderer.height-panelH)/2 + 110;
+  launchContainer.addChild(panel);
+  const msg = new Text(`You are staking ${ticketCount} ticket${ticketCount>1?'s':''} × ${formatStakeValue(stakeEach)} = ${formatStakeValue(total)}`, new TextStyle({ fill:'#ffcc66', fontSize:16, fontFamily:'system-ui' }));
+  msg.anchor.set(0.5); msg.x = panel.x + panelW/2; msg.y = panel.y + 40; launchContainer.addChild(msg);
+  const btnW = 120, btnH = 40; const gap = 16;
+  const makeBtn = (text:string, color:number, onTap:()=>void) => {
+    const g = new Graphics(); g.roundRect(0,0,btnW,btnH,10); g.fill({ color }); g.stroke({ color:0x2f3d4b, width:2 }); g.eventMode='static'; g.cursor='pointer';
+    const t = new Text(text, new TextStyle({ fill:'#ffffff', fontSize:16, fontWeight:'700', fontFamily:'system-ui' })); t.anchor.set(0.5); t.x = btnW/2; t.y = btnH/2; g.addChild(t);
+    g.on('pointertap', onTap);
+    return g;
+  };
+  const confirmBtn = makeBtn('Confirm', 0x2e7d32, ()=> proceedWithTickets(ticketCount));
+  const cancelBtn = makeBtn('Cancel', 0xb71c1c, ()=> { launchContainer?.removeChild(panel); });
+  const bx = panel.x + (panelW - (btnW*2 + gap))/2;
+  const by = panel.y + panelH - btnH - 16;
+  confirmBtn.x = bx; confirmBtn.y = by; cancelBtn.x = bx + btnW + gap; cancelBtn.y = by;
+  launchContainer.addChild(confirmBtn, cancelBtn);
+}
+
+function proceedWithTickets(ticketCount:number){
+  const stake = getCurrentStake();
+  const availableBase = [...animals];
+  for (let tIdx=0; tIdx<ticketCount; tIdx++){
+    const ids:number[] = [];
+    const pool = [...availableBase];
+    while(ids.length < 5 && pool.length){
+      const pick = Math.floor(Math.random()*pool.length);
+      ids.push(pool[pick].id);
+      pool.splice(pick,1);
+    }
+    const t: Ticket = { id: nextTicketId++, animals: ids, complete:true, stake };
+    updateTicketOdds(t);
+    tickets.push(t);
+  }
+  renderTickets(); buildGrid(); layout(); refreshStakeLimitStatus(); updatePlayButtonState(); updateClearButtonState();
+  const baseContainers = [leftContainer, centerContainer, rightContainer];
+  let outF=0; const outDur=60; app.ticker.add(function fadeOut(){
+    outF++; const p = 1 - Math.pow(1 - outF/outDur, 3);
+    baseContainers.forEach(c=> c.alpha = p);
+    if (outF>=outDur){ app.ticker.remove(fadeOut); }
+  });
+  if (launchContainer){ let cf=0; const cd=60; app.ticker.add(function contOut(){ cf++; const p = 1 - Math.pow(1 - cf/cd, 3); launchContainer!.alpha = 1 - p; if (cf>=cd){ app.ticker.remove(contOut); launchContainer?.destroy(); launchContainer=null; } }); }
+  if (launchOverlay){ let of=0; const od=60; const start = launchOverlay.alpha; app.ticker.add(function overOut(){ of++; const p = 1 - Math.pow(1 - of/od, 3); launchOverlay!.alpha = start*(1 - p); if (of>=od){ app.ticker.remove(overOut); launchOverlay?.destroy(); launchOverlay=null; launchMenuActive=false; } }); }
+  // Auto trigger play after fade completes
+  setTimeout(()=>{ startAutoRound(); }, 200);
+}
+
+// --- Auto Round (base game) ---
+function startAutoRound(){
+  if (isPlaying) return;
+  if (!tickets.length) return;
+  isPlaying = true;
+  updateRandomButtonState(); updateClearButtonState();
+  // Generate 5 random animal draws
+  const draws: number[] = [];
+  // Ensure results panel exists
+  if (resultSlots.length === 0){ buildRightSlots(); }
+  // Reveal one-by-one
+  const revealDelayMs = 700;
+  const showDrawAt = (i:number, id:number)=>{
+    const slot = resultSlots[i];
+    if (!slot) return;
+    slot.removeChildren();
+    const slotW = slot.width; const slotH = slot.height;
+    const animal = animals.find(a=>a.id===id);
+    const emoji = new Text(animal? animal.emoji : '❓', new TextStyle({ fill:'#ffffff', fontSize: Math.min(64, slotH*0.8), fontFamily:'system-ui' }));
+    emoji.anchor.set(0.5); emoji.x = slotW/2; emoji.y = slotH/2; emoji.alpha = 0; emoji.scale.set(0.6);
+    slot.addChild(emoji);
+    let f=0; const dur=24; app.ticker.add(function appear(){ f++; const p=f/dur; const e=1 - Math.pow(1-p,3); emoji.alpha = e; emoji.scale.set(0.6 + 0.4*e); if (f>=dur){ app.ticker.remove(appear); } });
+  };
+  const stepReveal = (idx:number)=>{
+    if (idx >= 5){
+      // Finalize round after last reveal
+      const winners: Ticket[] = [];
+      const totalWin = tickets.reduce((sum,t)=>{
+        const w = t.lastWin || 0; if (w>0){ winners.push(t); }
+        return sum + w;
+      },0);
+      if (totalWin > 0){ animateBalanceTo(balance + totalWin); spawnWinPopup(totalWin); }
+      // Show total win banner below tickets panel
+      showRoundTotalWin(totalWin);
+      setTimeout(()=>{
+        isPlaying = false;
+        updateRandomButtonState(); updateClearButtonState();
+        setTimeout(()=>{ showLaunchTicketMenu(); }, 5000);
+      }, 600);
+      return;
+    }
+    const pick = animals[Math.floor(Math.random()*animals.length)].id;
+    draws.push(pick);
+    showDrawAt(idx, pick);
+    // Update tickets progressively for UI markers (pos/any) and provisional potential
+    tickets.forEach(t=>{
+      const partial = draws.map((d, i2)=> i2 <= idx ? d : null);
+      const { multiplier, posMatches, anyMatches } = computeTicketWin(t, partial);
+      t.posMatches = posMatches; t.anyMatches = anyMatches;
+      // Provisional potential win for sorting during reveal
+      t.tempPotentialWin = t.stake * multiplier;
+      if (idx === 4){ // on final update, set lastWin to real
+        t.lastWin = t.tempPotentialWin || 0;
+        t.tempPotentialWin = 0;
+        if (t.lastWin && t.lastWin>0){ spawnTicketWinParticles(t); }
+      }
+    });
+    // Refresh center to reflect progressive matches/wins
+    refreshCenterTickets();
+    setTimeout(()=> stepReveal(idx+1), revealDelayMs);
+  };
+  stepReveal(0);
+}
+
+// Display total win below the tickets panel in the center section
+let roundTotalWinText: Text | null = null;
+function showRoundTotalWin(amount:number){
+  // Remove previous banner if any
+  if (roundTotalWinText && !roundTotalWinText.destroyed){ roundTotalWinText.parent?.removeChild(roundTotalWinText); roundTotalWinText.destroy(); roundTotalWinText = null; }
+  const label = amount > 0 ? `Total Win: ${formatStakeValue(amount)}` : 'No Win';
+  const style = new TextStyle({ fill:'#ffcc66', fontSize:24, fontFamily:'system-ui', fontWeight:'700' });
+  const txt = new Text(label, style);
+  txt.anchor.set(0.5,0);
+  // Position centered above the cabinet UI, always visible
+  const canvasW = app.renderer.width;
+  const yAboveCabinet = Math.max(0, app.renderer.height - BOTTOM_UI_HEIGHT - 36);
+  txt.x = canvasW/2;
+  txt.y = yAboveCabinet;
+  txt.zIndex = 1002;
+  app.stage.addChild(txt);
+  roundTotalWinText = txt;
+}
